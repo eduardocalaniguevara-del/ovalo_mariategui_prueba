@@ -177,3 +177,13 @@ Porque en nuestra WebApp Local (`estancias` y `huespedes_padron`) tenemos la cas
 3. `arnes_recepcion/.agent/harness/guardrails/safety_rules.json`: Añadir regla `GR-09`.
 4. `static/PanelDisponibilidad.html`, `domain_logic.py` y `main.py`: Burbuja flotante `🤖 Copiloto Óvalo`, visor de fotos guía, confirmación en chat, botón de **Extracto del Dueño** y endpoints RPC (`consultarAsistenteRecepcion`, `confirmarMovimientoAsistente`, `obtenerExtractoDuenoAsistente`).
 
+---
+
+## 🔗 16. CANAL GIT EXCLUSIVO DE PRUEBA (L1 <-> L2 EN PUERTO 8082) [2026-11-16]
+- **Regla Permanente (/learn):** Las dos carpetas C:\ovalo_mariategui_prueba (Laptop 1 y Laptop 2, puerto 8082) estan conectadas entre si a traves de su propio repositorio GitHub exclusivo:
+  - **Repositorio Git de Prueba (:8082):** https://github.com/eduardocalaniguevara-del/ovalo_mariategui_prueba.git (rama main).
+  - **Repositorio Git Operativo (:8080):** https://github.com/eduardocalaniguevara-del/app_local_recepcion.git (rama main).
+- **Como funciona:**
+  1. Cuando haces un cambio de codigo en C:\ovalo_mariategui_prueba en cualquiera de las dos laptops, ejecutas python publicar_github.py (o Publicar_Actualizacion_Hoteles.bat).
+  2. auto_updater.py en la otra laptop (puerto 8082) revisa cada 20 segundos eduardocalaniguevara-del/ovalo_mariategui_prueba y descarga los cambios automaticamente sin tocar data/ ni .db y sin tocar jamas la Hoja Operativa (:8080).
+  3. Recien cuando el dueno valida en Prueba (:8082) y da la orden explicita con codigo 7991, se ejecuta promover_a_operativa.py --aplicar para pasar el codigo validado al repositorio Operativo (app_local_recepcion).
