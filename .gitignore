@@ -1,0 +1,34 @@
+# Datos locales de cada hotel (Base de datos SQLite y Perfil con SPREADSHEET_ID)
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+hotel_perfil.json
+
+# Credenciales de Google Service Account (nunca subir a GitHub)
+credentials.json
+*credentials*.json
+
+# Archivos temporales de Python y logs
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+Thumbs.db
+.playwright-cli/
+test-results/
+tests/screenshots/
+
+# --- Seguridad / entorno local (L2) ---
+.env
+*.env
+whatsapp_mcp_recepcion/auth_info/
+whatsapp_mcp_recepcion/media/
+auth_info/
+media/
+.venv_whisper/
+node_modules/
+scratch/
+data/*.json.bak
+whatsapp_mcp_recepcion/qr_*.png

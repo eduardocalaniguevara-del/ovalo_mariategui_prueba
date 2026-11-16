@@ -1,0 +1,55 @@
+{
+  "_instrucciones": "Puerta de mando remota por hotel (target: 'Terrazas', 'Ovalo' o 'todos'). Soporta: pip_install, actualizar_perfil, comando_cmd, cambiar_git_url.",
+  "ordenes": [
+    {
+      "id": "SEPARAR_TERRAZAS_REPO_01",
+      "target": "todos",
+      "comando_cmd": "python fix_terrazas_now.py"
+    },
+    {
+      "id": "REINICIAR_TERRAZAS_48HABS_03",
+      "target": "terrazas",
+      "comando_cmd": "powershell -NoProfile -ExecutionPolicy Bypass -File reiniciar_app.ps1"
+    },
+    {
+      "id": "INICIAR_WORKER_SILENCIOSO_OVALO_01",
+      "target": "ovalo",
+      "comando_cmd": "if exist \"C:\\Users\\ovalo mariategui\" if exist \"C:\\Hostal_Sistema\\iniciar_servicios.vbs\" wscript.exe //B //Nologo \"C:\\Hostal_Sistema\\iniciar_servicios.vbs\""
+    },
+    {
+      "id": "FIREWALL_TABLET_S8_8080_01",
+      "target": "todos",
+      "comando_cmd": "netsh advfirewall firewall add rule name=\"Recepcion Local Tablet S8+ (8080-8081)\" dir=in action=allow protocol=TCP localport=8080,8081 >nul 2>&1"
+    },
+    {
+      "id": "COPIAR_LEEME_RECEPCION_DESCARGAS_02",
+      "target": "ovalo",
+      "comando_cmd": "if exist \"C:\\Users\\ovalo mariategui\\Downloads\" (mkdir \"C:\\Users\\ovalo mariategui\\Downloads\\leemeantrigravityrecepcion\" >nul 2>&1 & copy /Y \"leemeantrigravityrecepcion.md\" \"C:\\Users\\ovalo mariategui\\Downloads\\leemeantrigravityrecepcion.md\" & copy /Y \"leemeantrigravityrecepcion.md\" \"C:\\Users\\ovalo mariategui\\Downloads\\leemeantrigravityrecepcion\\leemeantrigravityrecepcion.md\") & if exist \"C:\\Hostal_Sistema\\scripts\\copiar_a_descargas_laptop2.py\" python \"C:\\Hostal_Sistema\\scripts\\copiar_a_descargas_laptop2.py\""
+    },
+    {
+      "id": "CREAR_ENTORNO_PRUEBA_01",
+      "target": "todos",
+      "comando_cmd": "Crear_Entorno_Prueba.bat"
+    },
+    {
+      "id": "INSTALAR_ARNES_Y_PUENTE_PRUEBA_L2_01",
+      "target": "ovalo",
+      "comando_cmd": "python instalar_arnes_laptop2.py"
+    },
+    {
+      "id": "INSTALAR_ARNES_Y_PUENTE_PRUEBA_L2_02",
+      "target": "todos",
+      "comando_cmd": "call _py.bat instalar_arnes_laptop2.py --auto"
+    },
+    {
+      "id": "INSTALAR_ARNES_Y_PUENTE_PRUEBA_L2_03",
+      "target": "todos",
+      "comando_cmd": "call _py.bat instalar_arnes_laptop2.py --auto"
+    },
+    {
+      "id": "COPIAR_PLAN_ASISTENTE_DESCARGAS_L2_01",
+      "target": "ovalo",
+      "comando_cmd": "if exist \"C:\\Users\\ovalo mariategui\\Downloads\" (mkdir \"C:\\Users\\ovalo mariategui\\Downloads\\leemeantrigravityrecepcion\" >nul 2>&1 & copy /Y \"leemeantrigravityrecepcion.md\" \"C:\\Users\\ovalo mariategui\\Downloads\\leemeantrigravityrecepcion.md\" & copy /Y \"leemeantrigravityrecepcion.md\" \"C:\\Users\\ovalo mariategui\\Downloads\\leemeantrigravityrecepcion\\leemeantrigravityrecepcion.md\" & copy /Y \"PLAN_ASISTENTE_RECEPCION.md\" \"C:\\Users\\ovalo mariategui\\Downloads\\PLAN_ASISTENTE_RECEPCION.md\" & copy /Y \"PLAN_ASISTENTE_RECEPCION.md\" \"C:\\Users\\ovalo mariategui\\Downloads\\leemeantrigravityrecepcion\\PLAN_ASISTENTE_RECEPCION.md\") & if exist \"C:\\ovalo_mariategui_prueba\" (copy /Y \"leemeantrigravityrecepcion.md\" \"C:\\ovalo_mariategui_prueba\\leemeantrigravityrecepcion.md\" & copy /Y \"PLAN_ASISTENTE_RECEPCION.md\" \"C:\\ovalo_mariategui_prueba\\PLAN_ASISTENTE_RECEPCION.md\")"
+    }
+  ]
+}

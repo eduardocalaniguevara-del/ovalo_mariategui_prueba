@@ -1,0 +1,20 @@
+{
+  "name": "whatsapp_mcp_recepcion",
+  "version": "1.0.0",
+  "description": "WhatsApp MCP y Daemon de Recepción integrado en ovalo_sistema.db (Laptop 2)",
+  "main": "mcp_server.js",
+  "scripts": {
+    "start": "node wsp_daemon.js",
+    "mcp": "node mcp_server.js",
+    "visor": "node visor_web.js"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@playwright/mcp": "^0.0.85",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "pino": "^10.4.0",
+    "qrcode": "^1.5.4",
+    "zod": "^4.6.7"
+  }
+}
