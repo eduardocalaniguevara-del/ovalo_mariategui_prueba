@@ -1,0 +1,13 @@
+SISTEMA DE PRUEBA - OVALO MARIATEGUI PRUEBA
+=============================================
+Carpeta de prueba : C:\ovalo_mariategui_prueba
+Operativa real    : C:\Users\josec\Downloads\trabajo\Sistema de agentes IA\app_local_recepcion
+Puerto de prueba  : http://127.0.0.1:8082   (la operativa usa 8080)
+
+REGLAS DE ORO
+ - Aqui puedes editar y probar lo que quieras: NO toca la hoja de Google, ni Supabase, ni SUNAT, ni WhatsApp,
+   ni la otra laptop, ni la base de datos real.
+ - Los datos de prueba son una FOTO de la operativa. Para traer datos frescos: Refrescar_Datos_Prueba.bat
+ - Cuando TODO este OK en la prueba: Promover_a_Operativa.bat (muestra el plan, hace respaldo y publica a GitHub;
+   las 2 laptops se actualizan solas).
+ - Si algo cambio en la operativa mientras probabas, el promotor lo detecta (CONFLICTO) y NO lo pisa.

@@ -1,0 +1,778 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Motor SQLite Offline-First (Modo WAL + Synchronous FULL)
+Resiste apagones y cortes de internet en 0 ms.
+"""
+
+import os
+import shutil
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator
+from config import DB_PATH
+
+_db_init_lock = globals().get("_db_init_lock") or threading.Lock()
+_db_repair_lock = globals().get("_db_repair_lock") or threading.Lock()
+
+
+def get_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=20000;")
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    return conn
+
+
+def repair_db_if_malformed(force: bool = False) -> bool:
+    """
+    Verifica con PRAGMA quick_check si ovalo_sistema.db sufrió corrupción de páginas B-tree
+    (ej. en _supabase_outbox tras apagón o cierre forzado) y la reconstruye automáticamente
+    en caliente (0 pérdida de tablas de negocio, compatible con Windows WAL aunque otro proceso la tenga abierta).
+    """
+    db_file = Path(DB_PATH)
+    if not db_file.exists():
+        return False
+
+    with _db_repair_lock:
+        needs_repair = force
+        if not needs_repair:
+            chk_conn = None
+            try:
+                chk_conn = sqlite3.connect(str(db_file), timeout=15.0)
+                chk_conn.execute("PRAGMA busy_timeout=15000;")
+                res = chk_conn.execute("PRAGMA quick_check(1);").fetchall()
+                if not res or str(res[0][0]).strip().lower() != "ok":
+                    needs_repair = True
+            except sqlite3.DatabaseError as exc:
+                if any(k in str(exc).lower() for k in ("malformed", "corrupt", "not a database")):
+                    needs_repair = True
+            finally:
+                if chk_conn:
+                    try:
+                        chk_conn.close()
+                    except Exception:
+                        pass
+
+        if not needs_repair:
+            return False
+
+        print(f"[DB-REPAIR] Corrupción B-tree detectada en {db_file.name}. Iniciando autorreparación sin pérdida...")
+        tmp_clean = db_file.parent / f"{db_file.stem}_clean_rebuild.db"
+        bak_corrupt = db_file.parent / f"{db_file.stem}.corrupt_bak.db"
+        for f_old in (tmp_clean, Path(f"{tmp_clean}-wal"), Path(f"{tmp_clean}-shm")):
+            if f_old.exists():
+                try:
+                    f_old.unlink()
+                except Exception:
+                    pass
+
+        src = sqlite3.connect(str(db_file), timeout=30.0)
+        src.execute("PRAGMA busy_timeout=20000;")
+        dst = sqlite3.connect(str(tmp_clean), timeout=30.0)
+        try:
+            dst.execute("PRAGMA journal_mode=DELETE;")
+            dst.execute("PRAGMA synchronous=OFF;")
+            dst.execute("PRAGMA foreign_keys=OFF;")
+
+            tables_meta = src.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
+            ).fetchall()
+            indexes_meta = src.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
+            ).fetchall()
+
+            for t_name, t_sql in tables_meta:
+                dst.execute(t_sql)
+
+            for t_name, _ in tables_meta:
+                if t_name == "_supabase_outbox":
+                    continue  # Cola temporal de triggers: se recrea limpia
+                cols_info = dst.execute(f'PRAGMA table_info("{t_name}")').fetchall()
+                col_names = [c[1] for c in cols_info]
+                if not col_names:
+                    continue
+                cols_quoted = ", ".join(f'"{c}"' for c in col_names)
+                placeholders = ", ".join("?" for _ in col_names)
+                insert_sql = f'INSERT OR IGNORE INTO "{t_name}" ({cols_quoted}) VALUES ({placeholders})'
+
+                try:
+                    rows = src.execute(f'SELECT {cols_quoted} FROM "{t_name}"').fetchall()
+                    if rows:
+                        dst.executemany(insert_sql, rows)
+                except sqlite3.DatabaseError:
+                    # Rescate fila por fila por rowid si alguna página intermedia estuviera dañada
+                    try:
+                        bounds = src.execute(f'SELECT MIN(rowid), MAX(rowid) FROM "{t_name}"').fetchone()
+                        if bounds and bounds[0] is not None and bounds[1] is not None:
+                            for rid in range(int(bounds[0]), int(bounds[1]) + 1):
+                                try:
+                                    r_one = src.execute(
+                                        f'SELECT {cols_quoted} FROM "{t_name}" WHERE rowid = ?', (rid,)
+                                    ).fetchone()
+                                    if r_one:
+                                        dst.execute(insert_sql, r_one)
+                                except sqlite3.DatabaseError:
+                                    continue
+                    except Exception:
+                        pass
+
+            for _, idx_sql in indexes_meta:
+                try:
+                    dst.execute(idx_sql)
+                except Exception:
+                    pass
+
+            # Asegurar control de Supabase limpio y re-encolar estancias recientes por seguridad
+            dst.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS _supabase_sync_control (
+                    id      INTEGER PRIMARY KEY CHECK (id = 1),
+                    pulling INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT OR REPLACE INTO _supabase_sync_control (id, pulling) VALUES (1, 0);
+                CREATE TABLE IF NOT EXISTS _supabase_outbox (
+                    tabla      TEXT NOT NULL,
+                    pk1        TEXT NOT NULL,
+                    pk2        TEXT NOT NULL DEFAULT '',
+                    op         TEXT NOT NULL DEFAULT 'UPSERT',
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    PRIMARY KEY (tabla, pk1, pk2)
+                );
+                """
+            )
+            try:
+                dst.execute(
+                    """
+                    INSERT OR IGNORE INTO _supabase_outbox (tabla, pk1, pk2, op, updated_at)
+                    SELECT 'estancias', estancia_uuid, '', 'UPSERT', datetime('now', 'localtime')
+                    FROM estancias ORDER BY ymd_in DESC, sheet_row DESC LIMIT 40
+                    """
+                )
+            except Exception:
+                pass
+
+            dst.commit()
+        finally:
+            src.close()
+            dst.close()
+
+        try:
+            shutil.copy2(str(db_file), str(bak_corrupt))
+        except Exception:
+            pass
+
+        replaced = False
+        try:
+            for suf in ("-wal", "-shm"):
+                wf = Path(f"{db_file}{suf}")
+                if wf.exists():
+                    wf.unlink()
+            os.replace(str(tmp_clean), str(db_file))
+            replaced = True
+        except OSError:
+            # Si otro proceso en Windows mantiene abierto ovalo_sistema.db, sobrescribir páginas en vivo vía SQLite Backup API
+            clean_c = sqlite3.connect(str(tmp_clean), timeout=30.0)
+            live_c = sqlite3.connect(str(db_file), timeout=30.0)
+            try:
+                live_c.execute("PRAGMA busy_timeout=25000;")
+                clean_c.backup(live_c)
+                live_c.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                replaced = True
+            finally:
+                clean_c.close()
+                live_c.close()
+                try:
+                    tmp_clean.unlink()
+                except Exception:
+                    pass
+
+        if replaced:
+            print(f"[DB-REPAIR] Base {db_file.name} reconstruida y verificada con éxito (OK).")
+        return replaced
+
+
+@contextmanager
+def db_transaction() -> Iterator[sqlite3.Connection]:
+    conn = get_connection()
+    need_repair_after = False
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        yield conn
+        conn.commit()
+    except sqlite3.DatabaseError as db_exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if any(k in str(db_exc).lower() for k in ("malformed", "corrupt", "not a database")):
+            need_repair_after = True
+        raise
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+        if need_repair_after:
+            try:
+                if repair_db_if_malformed(force=True):
+                    from supabase_sync import init_supabase_local_triggers
+                    init_supabase_local_triggers()
+            except Exception:
+                pass
+
+
+def init_db() -> None:
+    repair_db_if_malformed(force=False)
+    with _db_init_lock:
+        conn = get_connection()
+        try:
+            conn.executescript(
+                """
+                -- 1. Configuración de Habitaciones (Panel_Disponibilidad!A3:D31 + Config!A2:B40)
+                CREATE TABLE IF NOT EXISTS habitaciones_config (
+                    hab                 TEXT PRIMARY KEY,
+                    orden               INTEGER NOT NULL DEFAULT 0,
+                    tipo                TEXT NOT NULL DEFAULT '',
+                    precio_ref          TEXT NOT NULL DEFAULT '',
+                    color_personalizado TEXT NOT NULL DEFAULT '',
+                    dirty_color         INTEGER NOT NULL DEFAULT 0
+                );
+
+                -- 1b. Colores/notas del panel (SOLO LOCAL, desvinculado de Panel_Disponibilidad en Sheets).
+                --     fecha_dmy = '*' -> global permanente (Rojo Inutilizada); 'DD/MM/YYYY' -> solo ese día.
+                CREATE TABLE IF NOT EXISTS habitaciones_colores (
+                    hab         TEXT NOT NULL,
+                    fecha_dmy   TEXT NOT NULL,
+                    color_hex   TEXT NOT NULL,
+                    nota        TEXT NOT NULL DEFAULT '',
+                    updated_at  TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (hab, fecha_dmy)
+                );
+
+                -- 2. Catálogos generales de Config (Productos tienda, Personal, Categorías gastos, Hoteles apoyo)
+                CREATE TABLE IF NOT EXISTS catalogos_local (
+                    categoria TEXT NOT NULL,
+                    clave     TEXT NOT NULL,
+                    valor     TEXT NOT NULL DEFAULT '',
+                    orden     INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (categoria, clave)
+                );
+
+                -- 3. Padrón local de huéspedes y empresas (Autocompletado 0 ms de DNI/RUC y Visita N° X sin internet)
+                CREATE TABLE IF NOT EXISTS huespedes_padron (
+                    dni          TEXT PRIMARY KEY,
+                    nombre       TEXT NOT NULL DEFAULT '',
+                    sexo         TEXT NOT NULL DEFAULT 'M',
+                    nac          TEXT NOT NULL DEFAULT 'Perú',
+                    reg          TEXT NOT NULL DEFAULT 'Lima',
+                    mot          TEXT NOT NULL DEFAULT 'Vacaciones, recreo u ocio',
+                    hab_frec     TEXT NOT NULL DEFAULT '',
+                    tarifa_frec  REAL NOT NULL DEFAULT 0,
+                    empresa      TEXT NOT NULL DEFAULT '',
+                    celular      TEXT NOT NULL DEFAULT '',
+                    ruc          TEXT NOT NULL DEFAULT '',
+                    visitas      INTEGER NOT NULL DEFAULT 1,
+                    updated_at   TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS empresas_padron (
+                    ruc          TEXT PRIMARY KEY,
+                    razon_social TEXT NOT NULL DEFAULT '',
+                    updated_at   TEXT NOT NULL DEFAULT ''
+                );
+
+                -- 4. Registro_Estancias (Espejo completo de las 52 columnas A..AZ)
+                CREATE TABLE IF NOT EXISTS estancias (
+                    estancia_uuid        TEXT PRIMARY KEY,
+                    id_timestamp_str     TEXT UNIQUE NOT NULL,
+                    sheet_row            INTEGER NOT NULL DEFAULT 0,
+                    parent_uuid          TEXT NOT NULL DEFAULT '',
+                    fecha_in_dmy         TEXT NOT NULL DEFAULT '',
+                    fecha_out_dmy        TEXT NOT NULL DEFAULT '',
+                    ymd_in               INTEGER NOT NULL DEFAULT 0,
+                    ymd_out              INTEGER NOT NULL DEFAULT 0,
+                    hora_registro        TEXT NOT NULL DEFAULT '',
+                    huesped              TEXT NOT NULL DEFAULT '',
+                    dni                  TEXT NOT NULL DEFAULT '',
+                    sexo                 TEXT NOT NULL DEFAULT 'M',
+                    n_acomp              TEXT NOT NULL DEFAULT '',
+                    dni_acomp            TEXT NOT NULL DEFAULT '',
+                    nac                  TEXT NOT NULL DEFAULT 'Perú',
+                    reg                  TEXT NOT NULL DEFAULT 'Lima',
+                    mot                  TEXT NOT NULL DEFAULT 'Vacaciones, recreo u ocio',
+                    hab                  TEXT NOT NULL DEFAULT '',
+                    tipo_hab             TEXT NOT NULL DEFAULT '',
+                    visita               TEXT NOT NULL DEFAULT 'Visita N° 1',
+                    noches               INTEGER NOT NULL DEFAULT 1,
+                    tarifa               REAL NOT NULL DEFAULT 0,
+                    adic_snacks          REAL NOT NULL DEFAULT 0,
+                    adic_servicios       REAL NOT NULL DEFAULT 0,
+                    adic_comp            REAL NOT NULL DEFAULT 0,
+                    pago_ini_efec        REAL NOT NULL DEFAULT 0,
+                    pago_ini_yape        REAL NOT NULL DEFAULT 0,
+                    pago_post_efec       REAL NOT NULL DEFAULT 0,
+                    pago_post_yape       REAL NOT NULL DEFAULT 0,
+                    pago_visa            REAL NOT NULL DEFAULT 0,
+                    deuda_anterior       REAL NOT NULL DEFAULT 0,
+                    cuenta_destino       TEXT NOT NULL DEFAULT '',
+                    solicita_comp        TEXT NOT NULL DEFAULT 'No',
+                    tipo_comp            TEXT NOT NULL DEFAULT '',
+                    estado_comp          TEXT NOT NULL DEFAULT '',
+                    nro_comp             TEXT NOT NULL DEFAULT '',
+                    monto_factura        REAL NOT NULL DEFAULT 0,
+                    estado_estancia      TEXT NOT NULL DEFAULT 'En Curso',
+                    empresa              TEXT NOT NULL DEFAULT '',
+                    proyecto             TEXT NOT NULL DEFAULT '',
+                    triple1              TEXT NOT NULL DEFAULT '',
+                    triple2              TEXT NOT NULL DEFAULT '',
+                    hotel_apoyo          TEXT NOT NULL DEFAULT '',
+                    observaciones        TEXT NOT NULL DEFAULT '',
+                    nro_op_yape          TEXT NOT NULL DEFAULT '',
+                    celular              TEXT NOT NULL DEFAULT '',
+                    ruc                  TEXT NOT NULL DEFAULT '',
+                    excedente_efec_sunat REAL NOT NULL DEFAULT 0,
+                    dirty                INTEGER NOT NULL DEFAULT 0,
+                    updated_at           TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_estancias_hab_ymd ON estancias (hab, ymd_in, ymd_out);
+                CREATE INDEX IF NOT EXISTS idx_estancias_ymd ON estancias (ymd_in, ymd_out);
+                CREATE INDEX IF NOT EXISTS idx_estancias_sheet_row ON estancias (sheet_row);
+                CREATE INDEX IF NOT EXISTS idx_estancias_dni ON estancias (dni);
+
+                -- 5. Registro_Pagos (10 columnas)
+                CREATE TABLE IF NOT EXISTS pagos (
+                    pago_id       TEXT PRIMARY KEY,
+                    estancia_uuid TEXT NOT NULL DEFAULT '',
+                    id_estancia   TEXT NOT NULL DEFAULT '',
+                    fecha_iso     TEXT NOT NULL DEFAULT '',
+                    hab           TEXT NOT NULL DEFAULT '',
+                    huesped       TEXT NOT NULL DEFAULT '',
+                    monto         REAL NOT NULL DEFAULT 0,
+                    medio_pago    TEXT NOT NULL DEFAULT '',
+                    tipo_pago     TEXT NOT NULL DEFAULT '',
+                    concepto      TEXT NOT NULL DEFAULT '',
+                    nro_operacion TEXT NOT NULL DEFAULT '',
+                    sheet_row     INTEGER NOT NULL DEFAULT 0,
+                    synced        INTEGER NOT NULL DEFAULT 0
+                );
+
+                -- 6. 2.Registro_Ventas_Tienda (12 columnas)
+                CREATE TABLE IF NOT EXISTS ventas_tienda (
+                    venta_uuid    TEXT PRIMARY KEY,
+                    lote_uuid     TEXT NOT NULL DEFAULT '',
+                    estancia_uuid TEXT NOT NULL DEFAULT '',
+                    id_estancia   TEXT NOT NULL DEFAULT '',
+                    fecha_iso     TEXT NOT NULL DEFAULT '',
+                    fecha_dmy     TEXT NOT NULL DEFAULT '',
+                    producto      TEXT NOT NULL DEFAULT '',
+                    cantidad      INTEGER NOT NULL DEFAULT 1,
+                    metodo_pago   TEXT NOT NULL DEFAULT '',
+                    hab           TEXT NOT NULL DEFAULT '',
+                    personal      TEXT NOT NULL DEFAULT '',
+                    precio_unit   REAL NOT NULL DEFAULT 0,
+                    subtotal      REAL NOT NULL DEFAULT 0,
+                    nro_op_yape   TEXT NOT NULL DEFAULT '',
+                    sheet_row     INTEGER NOT NULL DEFAULT 0,
+                    synced        INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tienda_hab_fecha ON ventas_tienda (hab, fecha_dmy);
+
+                -- 6b. Vitrina_Tienda (Inventario y últimos 36 conteos / 12 días H:W)
+                CREATE TABLE IF NOT EXISTS vitrina_local (
+                    producto      TEXT PRIMARY KEY,
+                    orden         INTEGER NOT NULL DEFAULT 0,
+                    stock_sheets  REAL NOT NULL DEFAULT 0,
+                    estado_actual TEXT NOT NULL DEFAULT '',
+                    h1_cant       TEXT NOT NULL DEFAULT '',
+                    h1_est        TEXT NOT NULL DEFAULT '',
+                    h2_cant       TEXT NOT NULL DEFAULT '',
+                    h2_est        TEXT NOT NULL DEFAULT '',
+                    h3_cant       TEXT NOT NULL DEFAULT '',
+                    h3_est        TEXT NOT NULL DEFAULT '',
+                    h4_cant       TEXT NOT NULL DEFAULT '',
+                    h4_est        TEXT NOT NULL DEFAULT '',
+                    h5_cant       TEXT NOT NULL DEFAULT '',
+                    h5_est        TEXT NOT NULL DEFAULT '',
+                    h6_cant       TEXT NOT NULL DEFAULT '',
+                    h6_est        TEXT NOT NULL DEFAULT '',
+                    h7_cant       TEXT NOT NULL DEFAULT '',
+                    h7_est        TEXT NOT NULL DEFAULT '',
+                    h8_cant       TEXT NOT NULL DEFAULT '',
+                    h8_est        TEXT NOT NULL DEFAULT '',
+                    h9_cant       TEXT NOT NULL DEFAULT '',
+                    h9_est        TEXT NOT NULL DEFAULT '',
+                    h10_cant      TEXT NOT NULL DEFAULT '',
+                    h10_est       TEXT NOT NULL DEFAULT '',
+                    h11_cant      TEXT NOT NULL DEFAULT '',
+                    h11_est       TEXT NOT NULL DEFAULT '',
+                    h12_cant      TEXT NOT NULL DEFAULT '',
+                    h12_est       TEXT NOT NULL DEFAULT '',
+                    h13_cant      TEXT NOT NULL DEFAULT '',
+                    h13_est       TEXT NOT NULL DEFAULT '',
+                    h14_cant      TEXT NOT NULL DEFAULT '',
+                    h14_est       TEXT NOT NULL DEFAULT '',
+                    h15_cant      TEXT NOT NULL DEFAULT '',
+                    h15_est       TEXT NOT NULL DEFAULT '',
+                    h16_cant      TEXT NOT NULL DEFAULT '',
+                    h16_est       TEXT NOT NULL DEFAULT '',
+                    h17_cant      TEXT NOT NULL DEFAULT '',
+                    h17_est       TEXT NOT NULL DEFAULT '',
+                    h18_cant      TEXT NOT NULL DEFAULT '',
+                    h18_est       TEXT NOT NULL DEFAULT '',
+                    h19_cant      TEXT NOT NULL DEFAULT '',
+                    h19_est       TEXT NOT NULL DEFAULT '',
+                    h20_cant      TEXT NOT NULL DEFAULT '',
+                    h20_est       TEXT NOT NULL DEFAULT '',
+                    h21_cant      TEXT NOT NULL DEFAULT '',
+                    h21_est       TEXT NOT NULL DEFAULT '',
+                    h22_cant      TEXT NOT NULL DEFAULT '',
+                    h22_est       TEXT NOT NULL DEFAULT '',
+                    h23_cant      TEXT NOT NULL DEFAULT '',
+                    h23_est       TEXT NOT NULL DEFAULT '',
+                    h24_cant      TEXT NOT NULL DEFAULT '',
+                    h24_est       TEXT NOT NULL DEFAULT '',
+                    h25_cant      TEXT NOT NULL DEFAULT '',
+                    h25_est       TEXT NOT NULL DEFAULT '',
+                    h26_cant      TEXT NOT NULL DEFAULT '',
+                    h26_est       TEXT NOT NULL DEFAULT '',
+                    h27_cant      TEXT NOT NULL DEFAULT '',
+                    h27_est       TEXT NOT NULL DEFAULT '',
+                    h28_cant      TEXT NOT NULL DEFAULT '',
+                    h28_est       TEXT NOT NULL DEFAULT '',
+                    h29_cant      TEXT NOT NULL DEFAULT '',
+                    h29_est       TEXT NOT NULL DEFAULT '',
+                    h30_cant      TEXT NOT NULL DEFAULT '',
+                    h30_est       TEXT NOT NULL DEFAULT '',
+                    h31_cant      TEXT NOT NULL DEFAULT '',
+                    h31_est       TEXT NOT NULL DEFAULT '',
+                    h32_cant      TEXT NOT NULL DEFAULT '',
+                    h32_est       TEXT NOT NULL DEFAULT '',
+                    h33_cant      TEXT NOT NULL DEFAULT '',
+                    h33_est       TEXT NOT NULL DEFAULT '',
+                    h34_cant      TEXT NOT NULL DEFAULT '',
+                    h34_est       TEXT NOT NULL DEFAULT '',
+                    h35_cant      TEXT NOT NULL DEFAULT '',
+                    h35_est       TEXT NOT NULL DEFAULT '',
+                    h36_cant      TEXT NOT NULL DEFAULT '',
+                    h36_est       TEXT NOT NULL DEFAULT '',
+                    updated_at    TEXT NOT NULL DEFAULT ''
+                );
+
+                -- 6c. Gestión de Tienda / Kardex de Almacén (import_Almacen nativo)
+                CREATE TABLE IF NOT EXISTS almacen_movimientos (
+                    mov_uuid        TEXT PRIMARY KEY,
+                    lote_uuid       TEXT NOT NULL DEFAULT '',
+                    id_transaccion  TEXT NOT NULL DEFAULT '',
+                    fecha_dmy       TEXT NOT NULL DEFAULT '',
+                    producto        TEXT NOT NULL DEFAULT '',
+                    cantidad        REAL NOT NULL DEFAULT 0,
+                    costo_total     REAL NOT NULL DEFAULT 0,
+                    costo_unitario  REAL NOT NULL DEFAULT 0,
+                    metodo_pago     TEXT NOT NULL DEFAULT 'N/A',
+                    tipo_movimiento TEXT NOT NULL DEFAULT '',
+                    nota            TEXT NOT NULL DEFAULT '',
+                    sheet_row       INTEGER NOT NULL DEFAULT 0,
+                    synced          INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_alm_prod_tipo ON almacen_movimientos (producto, tipo_movimiento);
+                CREATE INDEX IF NOT EXISTS idx_alm_lote ON almacen_movimientos (lote_uuid);
+
+                -- 6d. Lotes de Compras de Tienda (Monto Total -> Registro_Gastos + Desglose progresivo por partes)
+                CREATE TABLE IF NOT EXISTS compras_tienda_lotes (
+                    compra_uuid      TEXT PRIMARY KEY,
+                    fecha_dmy        TEXT NOT NULL DEFAULT '',
+                    monto_total      REAL NOT NULL DEFAULT 0,
+                    monto_desglosado REAL NOT NULL DEFAULT 0,
+                    metodo_pago      TEXT NOT NULL DEFAULT 'Efectivo',
+                    responsable      TEXT NOT NULL DEFAULT 'ELEIZA',
+                    tipo_comp        TEXT NOT NULL DEFAULT 'Boleta',
+                    nro_comp         TEXT NOT NULL DEFAULT '',
+                    nota             TEXT NOT NULL DEFAULT '',
+                    gasto_uuid       TEXT NOT NULL DEFAULT '',
+                    estado           TEXT NOT NULL DEFAULT 'PENDIENTE',
+                    created_at       TEXT NOT NULL DEFAULT '',
+                    updated_at       TEXT NOT NULL DEFAULT ''
+                );
+
+                -- 7. Registro_Gastos (9 columnas)
+                CREATE TABLE IF NOT EXISTS gastos (
+                    gasto_uuid      TEXT PRIMARY KEY,
+                    id_ts_str       TEXT UNIQUE NOT NULL,
+                    fecha_gasto_iso TEXT NOT NULL DEFAULT '',
+                    fecha_gasto_dmy TEXT NOT NULL DEFAULT '',
+                    hora_registro   TEXT NOT NULL DEFAULT '',
+                    descripcion     TEXT NOT NULL DEFAULT '',
+                    monto           REAL NOT NULL DEFAULT 0,
+                    categoria       TEXT NOT NULL DEFAULT '',
+                    metodo_pago     TEXT NOT NULL DEFAULT '',
+                    tipo_comp       TEXT NOT NULL DEFAULT '',
+                    nro_comp        TEXT NOT NULL DEFAULT '',
+                    responsable     TEXT NOT NULL DEFAULT 'Admin',
+                    sheet_row       INTEGER NOT NULL DEFAULT 0,
+                    synced          INTEGER NOT NULL DEFAULT 0
+                );
+
+                -- 8. Índice cruzado de SUNAT_OCT y CALZADO_OCT
+                CREATE TABLE IF NOT EXISTS sunat_lineas_cache (
+                    id_linea      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nro_cp        TEXT NOT NULL DEFAULT '',
+                    tipo          TEXT NOT NULL DEFAULT 'BOLETA',
+                    noche_dmy     TEXT NOT NULL DEFAULT '',
+                    hab           TEXT NOT NULL DEFAULT '',
+                    monto_linea   REAL NOT NULL DEFAULT 0,
+                    total_cp      REAL NOT NULL DEFAULT 0,
+                    cliente       TEXT NOT NULL DEFAULT '',
+                    doc           TEXT NOT NULL DEFAULT '',
+                    fecha_emision TEXT NOT NULL DEFAULT '',
+                    estado        TEXT NOT NULL DEFAULT 'VIGENTE',
+                    descripcion   TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sunat_cp ON sunat_lineas_cache (nro_cp);
+                CREATE INDEX IF NOT EXISTS idx_sunat_noche_hab ON sunat_lineas_cache (noche_dmy, hab);
+
+                CREATE TABLE IF NOT EXISTS calzado_cache (
+                    clave_calzado       TEXT PRIMARY KEY,
+                    fila_calzado        INTEGER NOT NULL DEFAULT 0,
+                    noche_dmy           TEXT NOT NULL DEFAULT '',
+                    hab                 TEXT NOT NULL DEFAULT '',
+                    huesped             TEXT NOT NULL DEFAULT '',
+                    dni                 TEXT NOT NULL DEFAULT '',
+                    fila_est            TEXT NOT NULL DEFAULT '',
+                    monto_sunat         REAL NOT NULL DEFAULT 0,
+                    comprobantes        TEXT NOT NULL DEFAULT '',
+                    monto_aj            REAL NOT NULL DEFAULT 0,
+                    yape_ab             REAL NOT NULL DEFAULT 0,
+                    efectivo_aa         REAL NOT NULL DEFAULT 0,
+                    excedente_efec      REAL NOT NULL DEFAULT 0,
+                    yape_bcp            REAL NOT NULL DEFAULT 0,
+                    estado_bcp          TEXT NOT NULL DEFAULT '',
+                    estado_conciliacion TEXT NOT NULL DEFAULT '',
+                    accion              TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_calzado_fila_est ON calzado_cache (fila_est);
+                CREATE INDEX IF NOT EXISTS idx_calzado_noche_hab ON calzado_cache (noche_dmy, hab);
+
+                -- 8b. Historial de movimientos (reloj tipo Sheets): quién hizo qué y cuándo
+                CREATE TABLE IF NOT EXISTS historial_movimientos (
+                    mov_id       TEXT PRIMARY KEY,
+                    fecha_dmy    TEXT NOT NULL DEFAULT '',
+                    hora         TEXT NOT NULL DEFAULT '',
+                    ts_iso       TEXT NOT NULL DEFAULT '',
+                    accion       TEXT NOT NULL DEFAULT '',
+                    hab          TEXT NOT NULL DEFAULT '',
+                    huesped      TEXT NOT NULL DEFAULT '',
+                    equipo       TEXT NOT NULL DEFAULT '',
+                    resumen      TEXT NOT NULL DEFAULT '',
+                    detalle_json TEXT NOT NULL DEFAULT '[]',
+                    monto        REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_mov_fecha ON historial_movimientos (fecha_dmy);
+
+                -- 9. Cola Transaccional de Sincronización (Outbox FIFO Idempotente)
+                CREATE TABLE IF NOT EXISTS sync_queue (
+                    queue_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    op_uuid      TEXT UNIQUE NOT NULL,
+                    op_type      TEXT NOT NULL,
+                    entity_uuid  TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    delta_caja   REAL NOT NULL DEFAULT 0,
+                    status       TEXT NOT NULL DEFAULT 'PENDING',
+                    attempts     INTEGER NOT NULL DEFAULT 0,
+                    last_error   TEXT NOT NULL DEFAULT '',
+                    created_at   TEXT NOT NULL DEFAULT '',
+                    synced_at    TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sync_status ON sync_queue (status, queue_id);
+
+                -- 9b. Horario y Pagos de Personal
+                CREATE TABLE IF NOT EXISTS personal_config (
+                    empleado        TEXT PRIMARY KEY,
+                    rol             TEXT NOT NULL DEFAULT '',
+                    categoria_tienda TEXT NOT NULL DEFAULT '',
+                    alias_json      TEXT NOT NULL DEFAULT '[]',
+                    sueldo          REAL NOT NULL DEFAULT 0,
+                    diario_manana   REAL NOT NULL DEFAULT 50,
+                    diario_noche    REAL NOT NULL DEFAULT 55,
+                    afp             REAL NOT NULL DEFAULT 0,
+                    descanso_dow    INTEGER NOT NULL DEFAULT 0,
+                    turno           TEXT NOT NULL DEFAULT 'DIA',
+                    orden           INTEGER NOT NULL DEFAULT 0,
+                    activo          INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE TABLE IF NOT EXISTS horario_registros (
+                    empleado     TEXT NOT NULL,
+                    fecha_dmy    TEXT NOT NULL,
+                    ymd          INTEGER NOT NULL DEFAULT 0,
+                    e1           TEXT NOT NULL DEFAULT '',
+                    s1           TEXT NOT NULL DEFAULT '',
+                    e2           TEXT NOT NULL DEFAULT '',
+                    s2           TEXT NOT NULL DEFAULT '',
+                    estado       TEXT NOT NULL DEFAULT '',
+                    extras       TEXT NOT NULL DEFAULT '',
+                    extra_noche  INTEGER NOT NULL DEFAULT 0,
+                    nota         TEXT NOT NULL DEFAULT '',
+                    ult_marca_ts TEXT NOT NULL DEFAULT '',
+                    updated_at   TEXT NOT NULL DEFAULT '',
+                    equipo       TEXT NOT NULL DEFAULT '',
+                    synced       INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (empleado, fecha_dmy)
+                );
+                CREATE INDEX IF NOT EXISTS idx_hor_emp_ymd ON horario_registros (empleado, ymd);
+
+                CREATE TABLE IF NOT EXISTS horario_auditoria (
+                    audit_uuid     TEXT PRIMARY KEY,
+                    empleado       TEXT NOT NULL DEFAULT '',
+                    fecha_dmy      TEXT NOT NULL DEFAULT '',
+                    campo          TEXT NOT NULL DEFAULT '',
+                    valor_anterior TEXT NOT NULL DEFAULT '',
+                    valor_nuevo    TEXT NOT NULL DEFAULT '',
+                    editado_ts     TEXT NOT NULL DEFAULT '',
+                    equipo         TEXT NOT NULL DEFAULT '',
+                    synced         INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_hor_aud_ts ON horario_auditoria (editado_ts);
+
+                CREATE TABLE IF NOT EXISTS horario_liquidaciones (
+                    liq_uuid     TEXT PRIMARY KEY,
+                    empleado     TEXT NOT NULL DEFAULT '',
+                    desde_dmy    TEXT NOT NULL DEFAULT '',
+                    hasta_dmy    TEXT NOT NULL DEFAULT '',
+                    neto         REAL NOT NULL DEFAULT 0,
+                    yape         REAL NOT NULL DEFAULT 0,
+                    efectivo     REAL NOT NULL DEFAULT 0,
+                    a_efec       REAL NOT NULL DEFAULT 0,
+                    detalle_json TEXT NOT NULL DEFAULT '{}',
+                    created_at   TEXT NOT NULL DEFAULT '',
+                    equipo       TEXT NOT NULL DEFAULT ''
+                );
+
+                -- 10. Estado de sistema y Caja Efectivo
+                CREATE TABLE IF NOT EXISTS estado_sistema (
+                    clave      TEXT PRIMARY KEY,
+                    valor      TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                );
+
+                -- 11. Control interno de Visitas / Pases (privado, sin exponer DNI en Registro_Estancias/Pagos)
+                CREATE TABLE IF NOT EXISTS control_pases (
+                    pase_uuid       TEXT PRIMARY KEY,
+                    fecha_dmy       TEXT NOT NULL,
+                    ymd             INTEGER NOT NULL DEFAULT 0,
+                    hora            TEXT NOT NULL DEFAULT '',
+                    hab             TEXT NOT NULL DEFAULT '',
+                    estancia_uuid   TEXT NOT NULL DEFAULT '',
+                    id_estancia     TEXT NOT NULL DEFAULT '',
+                    huesped_titular TEXT NOT NULL DEFAULT '',
+                    dni_visita      TEXT NOT NULL DEFAULT '',
+                    nombre_visita   TEXT NOT NULL DEFAULT '',
+                    estado          TEXT NOT NULL DEFAULT 'ACEPTADO',
+                    monto           REAL NOT NULL DEFAULT 10.0,
+                    motivo_rechazo  TEXT NOT NULL DEFAULT '',
+                    equipo          TEXT NOT NULL DEFAULT '',
+                    created_at      TEXT NOT NULL DEFAULT '',
+                    synced          INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_pases_ymd ON control_pases(ymd);
+                CREATE INDEX IF NOT EXISTS idx_pases_dni ON control_pases(dni_visita);
+
+                -- 12. Desglose individual de Servicios Adicionales por estancia (Garaje, Lavandería, Ducha, Visita, etc.)
+                CREATE TABLE IF NOT EXISTS servicios_detalle (
+                    serv_uuid     TEXT PRIMARY KEY,
+                    estancia_uuid TEXT NOT NULL DEFAULT '',
+                    id_estancia   TEXT NOT NULL DEFAULT '',
+                    fecha_dmy     TEXT NOT NULL DEFAULT '',
+                    hora          TEXT NOT NULL DEFAULT '',
+                    hab           TEXT NOT NULL DEFAULT '',
+                    tipo_servicio TEXT NOT NULL DEFAULT '',
+                    metodo_pago   TEXT NOT NULL DEFAULT 'Cargar a la Cuenta',
+                    monto         REAL NOT NULL DEFAULT 0.0,
+                    created_at    TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_serv_det_est ON servicios_detalle(estancia_uuid);
+                """
+            )
+            # Migración única: el panel de colores queda desvinculado de Sheets; se parte limpio.
+            ya = conn.execute("SELECT 1 FROM estado_sistema WHERE clave = 'colores_desvinculados_v1'").fetchone()
+            if not ya:
+                conn.execute("UPDATE habitaciones_config SET color_personalizado = '', dirty_color = 0")
+                conn.execute("UPDATE sync_queue SET status = 'SYNCED' WHERE op_type = 'COLOR_HAB' AND status != 'SYNCED'")
+                conn.execute(
+                    "INSERT OR REPLACE INTO estado_sistema (clave, valor, updated_at) VALUES ('colores_desvinculados_v1', '1', '')"
+                )
+            # Migración: Tipo de Adicional (Guardar equipaje, Ducha, Lavandería...)
+            cols_est = [r[1] for r in conn.execute("PRAGMA table_info(estancias)").fetchall()]
+            if "tipo_adicional" not in cols_est:
+                conn.execute("ALTER TABLE estancias ADD COLUMN tipo_adicional TEXT NOT NULL DEFAULT ''")
+            # Migración: Unificación de Boletas e Inexactos (M1)
+            if "unificado_en_uuid" not in cols_est:
+                conn.execute("ALTER TABLE estancias ADD COLUMN unificado_en_uuid TEXT NOT NULL DEFAULT ''")
+            if "opcion_decision" not in cols_est:
+                conn.execute("ALTER TABLE estancias ADD COLUMN opcion_decision TEXT NOT NULL DEFAULT ''")
+
+            cols_vt = [r[1] for r in conn.execute("PRAGMA table_info(ventas_tienda)").fetchall()]
+            if "yape_tienda_usado_en" not in cols_vt:
+                conn.execute("ALTER TABLE ventas_tienda ADD COLUMN yape_tienda_usado_en TEXT NOT NULL DEFAULT ''")
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS decisiones_boleta (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fecha_iso          TEXT NOT NULL DEFAULT '',
+                    estancia_uuid      TEXT NOT NULL DEFAULT '',
+                    escenario          TEXT NOT NULL DEFAULT '',
+                    opciones_json      TEXT NOT NULL DEFAULT '',
+                    sugerida           TEXT NOT NULL DEFAULT '',
+                    elegida            TEXT NOT NULL DEFAULT '',
+                    receptora_uuid     TEXT NOT NULL DEFAULT '',
+                    origen_tienda_json TEXT NOT NULL DEFAULT '',
+                    colchon            REAL NOT NULL DEFAULT 0,
+                    usuario            TEXT NOT NULL DEFAULT '',
+                    created_at         TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_decisiones_estancia ON decisiones_boleta (estancia_uuid)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_decisiones_escenario ON decisiones_boleta (escenario)")
+            # Migración: personal asociado a gastos (Adelanto de sueldo -> columna J de Registro_Gastos)
+            cols_gas = [r[1] for r in conn.execute("PRAGMA table_info(gastos)").fetchall()]
+            if "personal" not in cols_gas:
+                conn.execute("ALTER TABLE gastos ADD COLUMN personal TEXT NOT NULL DEFAULT ''")
+            # Migración: pago por Acumulado Efectivo (A. Efec) en liquidaciones
+            # Migración: ampliar historial de Vitrina_Tienda a 36 conteos hacia atrás (12 días / 1.5 semanas, h1..h36)
+            cols_vit = [r[1] for r in conn.execute("PRAGMA table_info(vitrina_local)").fetchall()]
+            for idx_h in range(1, 37):
+                for suf in ("cant", "est"):
+                    col_vh = f"h{idx_h}_{suf}"
+                    if col_vh not in cols_vit:
+                        conn.execute(f"ALTER TABLE vitrina_local ADD COLUMN {col_vh} TEXT NOT NULL DEFAULT ''")
+            cols_liq = [r[1] for r in conn.execute("PRAGMA table_info(horario_liquidaciones)").fetchall()]
+            if "a_efec" not in cols_liq:
+                conn.execute("ALTER TABLE horario_liquidaciones ADD COLUMN a_efec REAL NOT NULL DEFAULT 0")
+            # Semilla de personal (editable luego desde Cuentas / Pagos)
+            if not conn.execute("SELECT 1 FROM personal_config LIMIT 1").fetchone():
+                semilla = [
+                    ("Eliana", "Recepcionista", "Eliana", '["eliana"]', 1500, 50, 55, 128.48, 3, "DIA", 0),
+                    ("Eleiza", "Limpieza", "Limpieza", '["eleiza","eleisa"]', 1350, 50, 55, 153.49, 1, "DIA", 1),
+                    ("Yolyi", "Turno Noche", "Turno Noche", '["yolyi","yoli","yoly"]', 1450, 50, 55, 0, 2, "NOCHE", 2),
+                ]
+                conn.executemany(
+                    "INSERT INTO personal_config (empleado, rol, categoria_tienda, alias_json, sueldo, diario_manana, "
+                    "diario_noche, afp, descanso_dow, turno, orden, activo) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
+                    semilla,
+                )
+            conn.commit()
+        finally:
+            conn.close()
