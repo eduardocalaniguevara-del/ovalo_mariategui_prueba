@@ -1,7 +1,8 @@
 SISTEMA DE PRUEBA - OVALO MARIATEGUI PRUEBA
 =============================================
 Carpeta de prueba : C:\ovalo_mariategui_prueba
-Operativa real    : C:\Recepcion_Ovalo_Local
+Operativa real    : C:\Recepcion_Ovalo_Local   (Laptop 2 - Recepcion)
+Operativa real L1 : C:\Users\josec\Downloads\trabajo\Sistema de agentes IA\app_local_recepcion   (Laptop 1)
 Puerto de prueba  : http://127.0.0.1:8082   (la operativa usa 8080)
 
 REGLAS DE ORO

@@ -37,6 +37,8 @@ _TERRAZAS_SHEET_ID = "1vgjOLxc-eh1zw42uC3pxnM86Lo2jZkz8_uwrEFhw8ss"
 
 
 def _obtener_repo_slug() -> str:
+    if MODO_PRUEBA or "prueba" in str(BASE_APP_DIR).lower():
+        return "eduardocalaniguevara-del/ovalo_mariategui_prueba"
     es_terrazas = (
         "terrazas" in NOMBRE_HOTEL.lower()
         or SPREADSHEET_ID.strip() == _TERRAZAS_SHEET_ID
@@ -533,18 +535,14 @@ def _preservar_tablet_andino_local() -> bool:
 def verificar_y_aplicar_actualizacion() -> Dict[str, Any]:
     """
     Comprueba si GitHub (refs/heads/main) tiene un commit más reciente que la instalación local.
-    Intenta primero por Git si existe .git funcional; si no existe .git o falla cualquier paso,
-    aplica actualización directa por HTTPS ZIP en Python puro (0 dependencia de git.exe).
+    En MODO_PRUEBA sincroniza contra eduardocalaniguevara-del/ovalo_mariategui_prueba (L1 <-> L2).
+    En Operativa sincroniza contra eduardocalaniguevara-del/app_local_recepcion.
     """
-    if MODO_PRUEBA:
-        # Sistema de PRUEBA: jamás baja código de GitHub ni ejecuta órdenes remotas; solo recarga en caliente
-        # los archivos que tú editas en esta carpeta.
-        _verificar_recarga_local_mtime()
-        return {"actualizado": False, "motivo": "modo_prueba", "version": obtener_version_actual()}
-    if _preservar_tablet_andino_local():
+    if not MODO_PRUEBA and _preservar_tablet_andino_local():
         reiniciar_proceso_completo()
     _verificar_recarga_local_mtime()
-    procesar_ordenes_remotas()
+    if not MODO_PRUEBA:
+        procesar_ordenes_remotas()
 
     repo_slug = _obtener_repo_slug()
     repo_url = f"https://github.com/{repo_slug}.git"
@@ -560,6 +558,23 @@ def verificar_y_aplicar_actualizacion() -> Dict[str, Any]:
     if sha_remoto and sha_local and sha_remoto == sha_local:
         return {"actualizado": False, "motivo": "al_dia", "version": sha_local[:7]}
 
+    # GUARDA: si el remoto ya es ancestro de HEAD, este equipo tiene commits más nuevos pendientes de push
+    # (p. ej. una fusión L1+L2 recién hecha): jamás pisar el árbol local ni por git ni por ZIP.
+    if (BASE_APP_DIR / ".git").exists() and sha_remoto:
+        try:
+            _existe = _run_git(["cat-file", "-e", f"{sha_remoto}^{{commit}}"], timeout=5)
+            if _existe.returncode == 0:
+                _anc = _run_git(["merge-base", "--is-ancestor", sha_remoto, "HEAD"], timeout=5)
+                if _anc.returncode == 0:
+                    _head = _run_git(["rev-parse", "HEAD"], timeout=5).stdout.strip()
+                    if _head:
+                        _guardar_sha_local(_head)
+                    return {"actualizado": False, "motivo": "local_adelantado", "version": (_head or sha_local)[:7]}
+        except Exception:
+            pass
+
+    fetch_fallo = False
+
     cambiados: List[str] = []
     actualizado_por_git = False
     git_dir = BASE_APP_DIR / ".git"
@@ -569,6 +584,8 @@ def verificar_y_aplicar_actualizacion() -> Dict[str, Any]:
             _run_git(["config", "--global", "--add", "safe.directory", str(BASE_APP_DIR).replace("\\", "/")], timeout=5)
             _run_git(["remote", "set-url", "origin", repo_url], timeout=5)
             f = _run_git(["fetch", "origin", "main", "--quiet"], timeout=15)
+            if f.returncode != 0:
+                fetch_fallo = True
             if f.returncode == 0:
                 loc = _run_git(["rev-parse", "HEAD"], timeout=5)
                 rem = _run_git(["rev-parse", "origin/main"], timeout=5)
@@ -578,22 +595,48 @@ def verificar_y_aplicar_actualizacion() -> Dict[str, Any]:
                     if s_rem and s_loc == s_rem:
                         _guardar_sha_local(s_rem)
                         return {"actualizado": False, "motivo": "al_dia", "version": s_rem[:7]}
+                    # Verificar si origin/main realmente tiene commits nuevos que no están en HEAD
+                    ahead_rem = _run_git(["rev-list", "--count", "HEAD..origin/main"], timeout=5)
+                    if ahead_rem.returncode == 0 and ahead_rem.stdout.strip() == "0":
+                        # HEAD local está adelantado respecto a origin/main; no pisar cambios locales
+                        _guardar_sha_local(s_loc)
+                        return {"actualizado": False, "motivo": "local_adelantado", "version": s_loc[:7]}
                     if s_rem:
                         try:
                             df = _run_git(["diff", "--name-only", s_loc, s_rem], timeout=10)
                             cambiados = [x.strip() for x in df.stdout.splitlines() if x.strip()]
                         except Exception:
                             cambiados = []
-                        rst = _run_git(["reset", "--hard", "origin/main"], timeout=15)
-                        if rst.returncode == 0:
+                        if MODO_PRUEBA:
+                            # En prueba: preservar ediciones locales no confirmadas con stash + rebase
+                            st = _run_git(["status", "--porcelain"], timeout=5)
+                            has_dirty = bool(st.stdout.strip())
+                            if has_dirty:
+                                _run_git(["stash", "push", "-u", "-m", "auto_updater_sandbox_stash"], timeout=10)
+                            rb = _run_git(["rebase", "origin/main"], timeout=15)
+                            if rb.returncode != 0:
+                                _run_git(["rebase", "--abort"], timeout=5)
+                                _run_git(["reset", "--hard", "origin/main"], timeout=15)
+                            if has_dirty:
+                                _run_git(["stash", "pop"], timeout=10)
                             sha_local = s_loc
                             sha_remoto = s_rem
                             _guardar_sha_local(s_rem)
                             actualizado_por_git = True
+                        else:
+                            rst = _run_git(["reset", "--hard", "origin/main"], timeout=15)
+                            if rst.returncode == 0:
+                                sha_local = s_loc
+                                sha_remoto = s_rem
+                                _guardar_sha_local(s_rem)
+                                actualizado_por_git = True
         except Exception:
             actualizado_por_git = False
 
     if not actualizado_por_git:
+        if git_dir.exists() and fetch_fallo:
+            # Hay .git funcional pero el fetch falló: no se puede saber si el local está adelantado; no pisar con ZIP.
+            return {"actualizado": False, "motivo": "git_fetch_fallo_sin_pisar", "version": obtener_version_actual()}
         if not sha_remoto:
             return {"actualizado": False, "motivo": "sin_conexion_github", "version": obtener_version_actual()}
         try:
@@ -601,9 +644,10 @@ def verificar_y_aplicar_actualizacion() -> Dict[str, Any]:
         except Exception as exc:
             return {"actualizado": False, "motivo": "zip_error", "detalle": str(exc)}
 
-    if _preservar_tablet_andino_local() and 'main.py' not in cambiados:
-        cambiados.append('main.py')
-    procesar_ordenes_remotas()
+    if not MODO_PRUEBA:
+        if _preservar_tablet_andino_local() and 'main.py' not in cambiados:
+            cambiados.append('main.py')
+        procesar_ordenes_remotas()
     recargar_en_memoria_sin_cortes()
 
     core_py = {

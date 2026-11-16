@@ -1,7 +1,7 @@
 {
   "$schema": "harness_guardrails_v2",
-  "version": "2.0.0",
-  "updated_at": "2026-11-13T18:28:57.224Z",
+  "version": "2.1.0",
+  "updated_at": "2026-11-15T08:00:00.000Z",
   "rules": [
     {
       "id": "GR-01",
@@ -66,6 +66,46 @@
         "cambiar productos en venta de tienda"
       ],
       "source": "Plan Laptop 2 Recepción"
+    },
+    {
+      "id": "GR-09",
+      "name": "Ley 1: Integridad de Tienda, Almacén y Bloqueo de Vitrina a 3 Días",
+      "severity": "CRITICAL",
+      "trigger": "Gestión de Tienda, Transferencias Almacén -> Vitrina, Conteos de Turnos",
+      "action": "1) Prohibido transferir a Vitrina productos sin stock positivo previo en Almacén. 2) Si un faltante o sobrante en el conteo de Vitrina cumple > 72 horas (3 días) sin resolver, la interfaz de Gestión Tienda debe mostrar únicamente Vitrina (bloqueando el resto) hasta que la diferencia sea cero. 3) Continuidad estricta entre turnos: Stock Inicial Turno Entrante == Stock Final Turno Saliente + Transferencias - Ventas.",
+      "source": "Reglas Innegociables Hostal 2026"
+    },
+    {
+      "id": "GR-10",
+      "name": "Ley 2: 100% Calzado Cuenta Empresa BCP vs SUNAT (Avance Diario + Cierre Días 1 y 2)",
+      "severity": "CRITICAL",
+      "trigger": "Conciliación Bancaria, Emisión de Boletas/Facturas, Cierre Mensual SUNAT",
+      "action": "1) Todo sol que ingrese a la Cuenta Empresa BCP / Yape Maelen (****8023) debe estar 100% boleteado o facturado en SUNAT (menos Notas de Crédito). 2) Avance diario obligatorio: agrupar los Yapes chicos de tienda como 'Adicional por horas extras' en una sola boleta para no acumular el mes. 3) Cierre mensual días 1 y 2: apenas sale el extracto bancario oficial, cuadrar el desfase T+1 del último día del mes anterior y emitir remanentes hasta que Facturado + Boleteado - NC == Extracto BCP.",
+      "source": "Reglas Innegociables Hostal 2026"
+    },
+    {
+      "id": "GR-11",
+      "name": "Ley 3: Cero Omisiones Diarias Yape / BCP Maelen (Alerta +5 min y Auditoría 08:30 AM)",
+      "severity": "CRITICAL",
+      "trigger": "Vouchers WhatsApp Recepción, Registro_Pagos, Conciliación BCP Maelen",
+      "action": "Todo voucher que entra a WhatsApp de Recepción debe quedar anotado en la WebApp (Monto + Hora 12h AM/PM) en menos de 5 minutos. En la auditoría diaria de las 08:30 AM ningún abono del extracto BCP Maelen puede faltar en Registro_Pagos (descuadre permitido: S/ 0.00).",
+      "source": "Reglas Innegociables Hostal 2026"
+    },
+    {
+      "id": "GR-12",
+      "name": "Ley 4: Mudanza Completa de Datos al Rotar Habitación con Lápiz y Deuda RUC",
+      "severity": "CRITICAL",
+      "trigger": "Edición de Estancia (cambio de habitación habOriginal -> nuevaHab) o Consulta de Saldos",
+      "action": "1) Al rotar a un huésped de habitación con el lápiz, absolutamente todos sus pagos, consumos de tienda, deuda anterior y pases vinculados a su estanciaUuid se trasladan a la nueva habitación sin perder un solo céntimo. 2) En habitaciones con RUC/Empresa, el saldo de alojamiento jamás se recorta ni oculta.",
+      "source": "Reglas Innegociables Hostal 2026"
+    },
+    {
+      "id": "GR-13",
+      "name": "Ley 5: Aislamiento Hermético de Bóveda y Autonomía Operativa",
+      "severity": "BLOCKING",
+      "trigger": "Sincronización Laptop 2 o Acceso a Datos Financieros Privados",
+      "action": "En Laptop 2 (Recepción) el conteo de tablas o archivos de finanzas personales del administrador (Grupo 1) debe ser exactamente cero. La operación diaria de recepción no pide contraseñas, pero cualquier cambio de arquitectura o promoción de código exige autorización.",
+      "source": "Reglas Innegociables Hostal 2026"
     }
   ]
 }

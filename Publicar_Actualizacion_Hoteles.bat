@@ -1,16 +1,13 @@
 @echo off
 chcp 65001 > nul
 cd /d "%~dp0"
-set GIT_EXE=C:\Hostal_Sistema\tools\mingit\cmd\git.exe
-if not exist "%GIT_EXE%" set GIT_EXE=git
 
 echo ========================================================
-echo   PUBLICANDO ACTUALIZACION A LOS 3 HOTELES (GITHUB)
+echo   PUBLICANDO CAMBIOS EN GITHUB DE PRUEBA (L1 ^<--^> L2)
+echo   Repositorio: eduardocalaniguevara-del/ovalo_mariategui_prueba
 echo ========================================================
-"%GIT_EXE%" add -A
-"%GIT_EXE%" commit -m "Actualizacion automatica del sistema"
-"%GIT_EXE%" push -u origin main
+python publicar_github.py "Actualizacion de entorno de prueba (8082)"
 echo.
-echo [OK] Cambios enviados a GitHub. Las laptops de recepcion
-echo      descargaran la actualizacion automaticamente en ~45s.
+echo [OK] Cambios enviados al GitHub de Prueba. La otra laptop (8082)
+echo      descargara la actualizacion automaticamente en ~20s.
 pause

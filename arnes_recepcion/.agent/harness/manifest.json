@@ -118,7 +118,8 @@
           "source": "Plan Laptop 2 Recepción"
         },
         {
-          "id": "GR-09",
+          "id": "GR-14",
+          "alias": "GR-09 Copiloto Óvalo (Laptop 2)",
           "name": "Confidencialidad Financiera, Gastos y Credenciales en Copiloto de Recepción",
           "severity": "BLOCKING",
           "trigger": "Consulta al Asistente de Recepción (Copiloto Óvalo) sobre claves/accesos, ingresos semanales/mensuales/totales o tabla de gastos",
