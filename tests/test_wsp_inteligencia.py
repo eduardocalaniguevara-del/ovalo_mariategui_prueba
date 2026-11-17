@@ -33,6 +33,9 @@ RESPALDO_ASISTENTE = Path(r"C:\Hostal_Sistema\proyecto_asistente_recepcion")
 SCREENSHOTS_DIR = BASE_PRUEBA / "tests" / "screenshots"
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
+if str(BASE_PRUEBA) not in sys.path:
+    sys.path.insert(0, str(BASE_PRUEBA))
+
 RPC_URL = "http://127.0.0.1:8082/api/rpc"
 
 
@@ -264,7 +267,8 @@ def test_05_ui_edge_sin_copiloto_y_resumen_3_bloques():
         modal = page.locator("#modalWspBandeja").first
         assert modal.is_visible(), "El modal #modalWspBandeja debe abrirse al hacer clic en el ticker"
 
-        # Verificar presencia de los 3 bloques ejecutivos en el modal
+        # Esperar a que se rendericen los 3 bloques ejecutivos vía RPC
+        page.wait_for_selector("#wspBloquePendientes", timeout=12000)
         assert page.locator("#wspBloquePendientes").count() > 0, "Debe existir #wspBloquePendientes"
         assert page.locator("#wspBloqueNotas").count() > 0, "Debe existir #wspBloqueNotas"
         assert page.locator("#wspBloqueAtendidos").count() > 0, "Debe existir #wspBloqueAtendidos"
@@ -298,6 +302,84 @@ def test_05_ui_edge_sin_copiloto_y_resumen_3_bloques():
     assert len(page_errors) == 0, f"Errores JS en página: {page_errors}"
     errores_criticos = [e for e in console_errors if "wsp" in e.lower() or "copiloto" in e.lower()]
     assert len(errores_criticos) == 0, f"Errores JS en consola: {errores_criticos}"
+
+
+# ============================================================================
+# 6. FACTURA ABATRON (SUNAT) Y SUGERENCIA POR PERFIL WSP
+# ============================================================================
+def test_06_factura_abatron_y_sugerencia_perfil():
+    """Factura E001 por S/ 70.00 de ABATRON en SUNAT, copias de PDF, envío WSP a 922308808, y sugerencia inteligente por perfil."""
+    # 1. Verificar Factura en base operativa
+    conn_op = sqlite3.connect(f"file:{DB_OPERATIVA}?mode=ro", uri=True)
+    conn_op.row_factory = sqlite3.Row
+    try:
+        cur = conn_op.cursor()
+        cur.execute("SELECT nro_cp, monto_total, total, receptor_doc, receptor_nombre FROM sunat_ventas WHERE receptor_doc = '20451561686' ORDER BY rowid DESC LIMIT 1")
+        row = cur.fetchone()
+        assert row is not None, "No se encontró Factura para RUC 20451561686 en sunat_ventas"
+        monto = float(row["monto_total"] or row["total"] or 0)
+        assert monto == 70.0, f"El total de la factura debe ser S/ 70.00, se obtuvo S/ {monto}"
+        assert "E001-2128" in str(row["nro_cp"]), f"Nro comprobante debe ser E001-2128, fue {row['nro_cp']}"
+        nro_factura = str(row["nro_cp"])
+        print(f"Factura encontrada en SUNAT: {nro_factura} por S/ {monto}")
+
+        # 2. Verificar envío WhatsApp en la operativa (cola o mensajes con es_mio=1)
+        cur.execute("SELECT estado FROM wsp_recepcion_cola_envio WHERE destino_telefono LIKE '%922308808%' OR telefono_o_jid LIKE '%922308808%' ORDER BY id DESC LIMIT 1")
+        cola_row = cur.fetchone()
+        cur.execute("SELECT id_mensaje FROM wsp_recepcion_mensajes WHERE chat_jid LIKE '%922308808%' AND es_mio = 1 ORDER BY timestamp_unix DESC LIMIT 1")
+        msg_row = cur.fetchone()
+        assert (cola_row and cola_row[0] in ("ENVIADO", "PENDIENTE")) or msg_row is not None, "No se encontró registro de envío o mensaje enviado para el 51922308808@s.whatsapp.net"
+        print("Envío de WhatsApp a 922308808 verificado en operativa")
+    finally:
+        conn_op.close()
+
+    # 3. Verificar archivos PDF en disco
+    dir_nov = Path(r"C:\Hostal_Sistema\facturas_sunat\17_Noviembre")
+    dir_down = Path(r"C:\Users\ovalo mariategui\Downloads")
+    num_factura = nro_factura.split("-")[-1]
+    pdfs_nov = list(dir_nov.glob(f"*{num_factura}*.pdf")) if dir_nov.exists() else []
+    pdfs_down = list(dir_down.glob(f"*{num_factura}*.pdf")) if dir_down.exists() else []
+    print(f"PDFs encontrados: {len(pdfs_nov)} en facturas_sunat, {len(pdfs_down)} en Downloads")
+    assert len(pdfs_nov) > 0 or len(pdfs_down) > 0, f"No se encontró copia del PDF de la factura {nro_factura}"
+
+    # 4. Probar función _generar_sugerencia_perfil_wsp
+    import wsp_inteligencia as wi
+    conn_local = sqlite3.connect(f"file:{DB_PRUEBA}?mode=ro", uri=True)
+    conn_local.row_factory = sqlite3.Row
+    try:
+        if hasattr(wi, "_generar_sugerencia_perfil_wsp"):
+            sug = wi._generar_sugerencia_perfil_wsp("Erika Chacon ABATRON - KR", conn_local)
+            assert isinstance(sug, dict), "sugerencia debe ser dict"
+            assert "ABATRON" in str(sug.get("empresa_sugerida", "")) or "20451561686" in str(sug.get("empresa_sugerida", ""))
+            print(f"Sugerencia generada: {sug}")
+    finally:
+        conn_local.close()
+
+    # 5. Probar que en obtenerBandejaWsp venga sugerencia_wsp y captura del modal actualizado
+    s_act, _ = _llamar_rpc("actualizarResumenWspAhora", [])
+    assert s_act == 200, "actualizarResumenWspAhora falló"
+    s_ban, bandeja = _llamar_rpc("obtenerBandejaWsp", [])
+    assert s_ban == 200, "obtenerBandejaWsp falló"
+
+    items_todos = bandeja.get("pendientes_responder", []) + bandeja.get("recomendaciones_y_notas", []) + bandeja.get("atendidos_y_gracias", [])
+    con_sug = [it for it in items_todos if "sugerencia_wsp" in it]
+    print(f"Total ítems con sugerencia_wsp: {len(con_sug)}")
+    assert len(con_sug) > 0, "Debe haber ítems con 'sugerencia_wsp' en la bandeja WSP"
+
+    # 6. Captura visual de la sugerencia en Microsoft Edge
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(channel="msedge", headless=True)
+        context = browser.new_context(viewport={"width": 1366, "height": 768})
+        page = context.new_page()
+        page.goto("http://127.0.0.1:8082", wait_until="networkidle", timeout=30000)
+        time.sleep(1.0)
+        page.locator("#wspTicker").click()
+        time.sleep(1.2)
+        shot_sug = SCREENSHOTS_DIR / "wsp_03_modal_sugerencia_perfil.png"
+        page.screenshot(path=str(shot_sug))
+        assert shot_sug.exists(), "No se generó wsp_03_modal_sugerencia_perfil.png"
+        browser.close()
 
 
 if __name__ == "__main__":

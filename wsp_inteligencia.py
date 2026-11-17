@@ -708,13 +708,205 @@ def _observacion_25_texto(est: Dict[str, Any], monto_solicitado_dia: Optional[fl
     return "Tarifa regular sin recargo 25 % pendiente."
 
 
+_PALABRAS_GENERICAS_PERFIL = {
+    "OVALO", "MARIATEGUI", "HOTEL", "HOSTAL", "CLIENTE", "HOLA", "PARA", "PERU", "TACNA",
+    "CORPORACION", "EMPRESA", "EMPRESAS", "GRUPO", "INVERSIONES", "SERVICIOS", "REPRESENTACIONES",
+    "CONSTRUCTORA", "INGENIEROS", "INGENIERIA", "COMERCIAL", "ASOCIADOS", "GENERALES", "CONTRATISTAS",
+    "SOCIEDAD", "ANONIMA", "CERRADA", "RESPONSABILIDAD", "LIMITADA", "INDIVIDUAL",
+    "SAC", "SRL", "EIRL", "SAA", "SRA", "SRTA", "DON", "TOMAS", "PIERDES", "STORE",
+}
+_NOMBRES_PILA_COMUNES = {
+    "ERIKA", "ERICKA", "PAOLA", "MARIA", "JOSE", "JUAN", "LUIS", "CARLOS", "JORGE", "MIGUEL",
+    "ANGEL", "JESUS", "PEDRO", "ROSA", "CARMEN", "ANA", "ELENA", "VICTOR", "CESAR", "DAVID",
+    "DANIEL", "JULIO", "MARCO", "DIEGO", "RICARDO", "FERNANDO", "ALEJANDRO", "ROBERTO", "RAUL",
+    "RODOLFO", "SERGIO", "HECTOR", "ARTURO", "LOURDES", "FIORELA", "MILUSKA", "ELIANA", "ELEIZA",
+}
+
+
+def _tokens_perfil_wsp(nombre_wsp: str) -> List[str]:
+    """Extrae tokens alfabéticos significativos (>= 4 letras) del nombre de perfil de WhatsApp."""
+    s = str(nombre_wsp or "").strip()
+    if not s or "ovalo mariategui" in _sin_tildes(s).lower():
+        return []
+    # Separar letras de números pegados (ej. 'rodolfo20gp' -> 'rodolfo gp')
+    limpio = re.sub(r"[^A-Za-zÁÉÍÓÚáéíóúÑñ]+", " ", s)
+    out: List[str] = []
+    for w in _sin_tildes(limpio).upper().split():
+        if len(w) >= 4 and w not in _PALABRAS_GENERICAS_PERFIL and w not in out:
+            out.append(w)
+    return out
+
+
+def _generar_sugerencia_perfil_wsp(nombre_wsp: str, conn_local: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
+    """Analiza el nombre visible en WhatsApp (`chat_nombre` / `nombre_emisor`) y busca coincidencias en:
+      a) `empresas_padron` y `sunat_ventas` (RUC 10.../20...) -> `empresa_sugerida`
+      b) `estancias` y `huespedes_padron` -> hasta 2 `estancias_sugeridas` recientes."""
+    perfil_raw = str(nombre_wsp or "").strip()
+    if perfil_raw.lower() == "ovalo mariategui" or _solo_digitos(perfil_raw) == perfil_raw and len(perfil_raw) >= 9:
+        perfil_raw = ""
+
+    res_vacio = {
+        "perfil_wsp": perfil_raw,
+        "empresa_sugerida": "",
+        "ruc_sugerido": "",
+        "razon_social_sugerida": "",
+        "estancias_sugeridas": [],
+    }
+    tokens = _tokens_perfil_wsp(perfil_raw)
+    if not tokens:
+        return res_vacio
+
+    cerrar = False
+    if conn_local is None:
+        conn_local = _abrir_local_ro()
+        cerrar = True
+
+    try:
+        empresa_sug = ""
+        ruc_sug = ""
+        razon_sug = ""
+
+        # a) Búsqueda de empresa/RUC en empresas_padron y sunat_ventas
+        #    Usamos tokens no genéricos que no sean simples nombres de pila comunes (ej. ABATRON),
+        #    o pares de tokens si fuera persona natural con negocio (RUC 10...).
+        tokens_corp = [t for t in tokens if len(t) >= 5 and t not in _NOMBRES_PILA_COMUNES]
+        for tk in tokens_corp:
+            r_emp = conn_local.execute(
+                "SELECT ruc, razon_social FROM empresas_padron WHERE UPPER(razon_social) LIKE ? LIMIT 2",
+                (f"%{tk}%",),
+            ).fetchall()
+            if len(r_emp) == 1:
+                ruc_sug = str(r_emp[0]["ruc"] or "").strip()
+                razon_sug = str(r_emp[0]["razon_social"] or "").strip()
+                break
+            r_sv = conn_local.execute(
+                """SELECT receptor_doc, receptor_nombre
+                     FROM sunat_ventas
+                    WHERE LENGTH(TRIM(COALESCE(receptor_doc,''))) = 11
+                      AND (receptor_doc LIKE '20%' OR receptor_doc LIKE '10%')
+                      AND UPPER(COALESCE(receptor_nombre,'')) LIKE ?
+                    ORDER BY id DESC LIMIT 5""",
+                (f"%{tk}%",),
+            ).fetchall()
+            rucs_distintos = {str(x["receptor_doc"]).strip(): str(x["receptor_nombre"]).strip() for x in r_sv if x["receptor_doc"]}
+            if len(rucs_distintos) == 1:
+                ruc_sug, razon_sug = next(iter(rucs_distintos.items()))
+                break
+
+        if not ruc_sug and len(tokens) >= 2:
+            t1, t2 = tokens[0], tokens[1]
+            r_sv2 = conn_local.execute(
+                """SELECT receptor_doc, receptor_nombre
+                     FROM sunat_ventas
+                    WHERE LENGTH(TRIM(COALESCE(receptor_doc,''))) = 11
+                      AND UPPER(COALESCE(receptor_nombre,'')) LIKE ?
+                      AND UPPER(COALESCE(receptor_nombre,'')) LIKE ?
+                    ORDER BY id DESC LIMIT 3""",
+                (f"%{t1}%", f"%{t2}%"),
+            ).fetchall()
+            if r_sv2:
+                ruc_sug = str(r_sv2[0]["receptor_doc"] or "").strip()
+                razon_sug = str(r_sv2[0]["receptor_nombre"] or "").strip()
+
+        if razon_sug and ruc_sug:
+            empresa_sug = f"{razon_sug} (RUC {ruc_sug})"
+        elif razon_sug:
+            empresa_sug = razon_sug
+
+        # b) Búsqueda de huéspedes/estancias recientes por tokens del perfil WSP
+        estancias_sug: List[Dict[str, Any]] = []
+        rows_est: List[sqlite3.Row] = []
+        if len(tokens) >= 2:
+            # Probar combinaciones de pares de tokens (ej. ERIKA + CHACON, PAOLA + LINARES)
+            for i in range(min(3, len(tokens))):
+                for j in range(i + 1, min(4, len(tokens))):
+                    t1, t2 = tokens[i], tokens[j]
+                    rows_est = conn_local.execute(
+                        f"SELECT {_EST_COLS} FROM estancias "
+                        f"WHERE UPPER(COALESCE(huesped,'')) LIKE ? AND UPPER(COALESCE(huesped,'')) LIKE ? "
+                        f"AND LOWER(COALESCE(estado_estancia,'')) NOT LIKE 'cancel%' "
+                        f"ORDER BY ymd_in DESC LIMIT 6",
+                        (f"%{t1}%", f"%{t2}%"),
+                    ).fetchall()
+                    if rows_est:
+                        break
+                if rows_est:
+                    break
+
+        if not rows_est and tokens_corp:
+            # Buscar también si el token corporativo figura en estancias.empresa
+            tk0 = tokens_corp[0]
+            rows_est = conn_local.execute(
+                f"SELECT {_EST_COLS} FROM estancias "
+                f"WHERE UPPER(COALESCE(empresa,'')) LIKE ? "
+                f"AND LOWER(COALESCE(estado_estancia,'')) NOT LIKE 'cancel%' "
+                f"ORDER BY ymd_in DESC LIMIT 4",
+                (f"%{tk0}%",),
+            ).fetchall()
+
+        vistos_est: Set[Tuple[str, str, str]] = set()
+        for r in rows_est:
+            ed = _estancia_dict(r)
+            clave_e = (ed["dni"] or ed["huesped"], ed["hab"], ed["check_in"])
+            if clave_e in vistos_est:
+                continue
+            vistos_est.add(clave_e)
+            estancias_sug.append({
+                "huesped": ed["huesped"],
+                "dni": ed["dni"],
+                "hab": ed["hab"],
+                "fecha": ed["check_in"],
+                "pagado": ed["pagado"],
+                "empresa": ed["empresa"] or razon_sug,
+                "ruc": ed["ruc"] or ruc_sug,
+            })
+            if not empresa_sug and ed["empresa"] and ed["ruc"]:
+                ruc_sug = ed["ruc"]
+                razon_sug = ed["empresa"]
+                empresa_sug = f"{ed['empresa']} (RUC {ed['ruc']})"
+            if len(estancias_sug) >= 2:
+                break
+
+        if not estancias_sug and len(tokens) >= 2:
+            t1, t2 = tokens[0], tokens[1]
+            rows_pad = conn_local.execute(
+                """SELECT dni, nombre, hab_frec, tarifa_frec, empresa, ruc
+                     FROM huespedes_padron
+                    WHERE UPPER(COALESCE(nombre,'')) LIKE ? AND UPPER(COALESCE(nombre,'')) LIKE ?
+                    ORDER BY visitas DESC LIMIT 2""",
+                (f"%{t1}%", f"%{t2}%"),
+            ).fetchall()
+            for rp in rows_pad:
+                estancias_sug.append({
+                    "huesped": str(rp["nombre"] or "").strip(),
+                    "dni": str(rp["dni"] or "").strip(),
+                    "hab": str(rp["hab_frec"] or "").strip(),
+                    "fecha": "Padrón histórico",
+                    "pagado": _num(rp["tarifa_frec"]),
+                    "empresa": str(rp["empresa"] or razon_sug).strip(),
+                    "ruc": str(rp["ruc"] or ruc_sug).strip(),
+                })
+
+        return {
+            "perfil_wsp": perfil_raw,
+            "empresa_sugerida": empresa_sug,
+            "ruc_sugerido": ruc_sug,
+            "razon_social_sugerida": razon_sug,
+            "estancias_sugeridas": estancias_sug,
+        }
+    finally:
+        if cerrar:
+            conn_local.close()
+
+
 def cruzar_conversacion(
     jid: str,
     nombre_chat: str,
     texto_completo: str,
-    ultimo_ts: int,
+    ultimo_ts: int = 0,
 ) -> Dict[str, Any]:
-    """Cruza una conversación con estancias, padrón y SUNAT en modo 100 % lectura."""
+    """Cruza una conversación con estancias, padrón y SUNAT en modo 100 % lectura,
+    enriqueciendo con sugerencias por Nombre de Perfil de WhatsApp (`via = 'PERFIL_WSP'`)."""
     habs_val = _habs_validas()
     ent = extraer_entidades(texto_completo, habs_val)
     cel9 = _celular9(jid)
@@ -728,8 +920,10 @@ def cruzar_conversacion(
 
     conn = _abrir_local_ro()
     try:
+        sug_wsp = _generar_sugerencia_perfil_wsp(nombre_chat, conn)
         est_cel = None
         est_txt = None
+        est_perfil = None
         huesped_pad = None
 
         if cel9:
@@ -758,26 +952,31 @@ def cruzar_conversacion(
         if not est_txt and ent.get("ruc"):
             est_txt = _estancia_por(conn, "TRIM(ruc)=?", (ent["ruc"],), min_ymd, ref_ymd=ref_ymd)
         if not est_txt and ent.get("habs"):
-            # Elegir la última habitación mencionada o la activa en la fecha del chat
             for h in reversed(ent["habs"]):
                 est_txt = _estancia_por(conn, "TRIM(hab)=?", (str(h),), min_ymd, ref_ymd=ref_ymd)
                 if est_txt:
                     break
+
+        # Si no hubo cruce por celular ni por datos del texto, cruzar por tokens del nombre de perfil WSP
         if not est_cel and not est_txt and nombre_chat:
-            limpio_nom = re.sub(r"[^A-Za-zÁÉÍÓÚáéíóúÑñ\s]", " ", nombre_chat)
-            tokens_nom = [
-                w for w in _sin_tildes(limpio_nom).upper().split()
-                if len(w) >= 4 and w not in {"OVALO", "MARIATEGUI", "HOTEL", "HOSTAL", "CLIENTE", "HOLA", "PARA"}
-            ]
+            tokens_nom = _tokens_perfil_wsp(nombre_chat)
             if len(tokens_nom) >= 2:
-                p1, p2 = tokens_nom[0], tokens_nom[1]
-                est_txt = _estancia_por(
-                    conn,
-                    "UPPER(huesped) LIKE ? AND UPPER(huesped) LIKE ?",
-                    (f"%{p1}%", f"%{p2}%"),
-                    min_ymd - 100,
-                    ref_ymd=ref_ymd,
-                )
+                for i in range(min(3, len(tokens_nom))):
+                    for j in range(i + 1, min(4, len(tokens_nom))):
+                        p1, p2 = tokens_nom[i], tokens_nom[j]
+                        est_perfil = _estancia_por(
+                            conn,
+                            "UPPER(huesped) LIKE ? AND UPPER(huesped) LIKE ?",
+                            (f"%{p1}%", f"%{p2}%"),
+                            min_ymd - 200,
+                            ref_ymd=ref_ymd,
+                        )
+                        if est_perfil:
+                            break
+                    if est_perfil:
+                        break
+            if not est_perfil and sug_wsp.get("ruc_sugerido"):
+                est_perfil = _estancia_por(conn, "TRIM(ruc)=?", (sug_wsp["ruc_sugerido"],), min_ymd - 200, ref_ymd=ref_ymd)
 
         via: Optional[str] = None
         est = None
@@ -788,21 +987,44 @@ def cruzar_conversacion(
             via, est = "CELULAR", est_cel
         elif est_txt:
             via, est = "TEXTO", est_txt
+        elif est_perfil:
+            via, est = "PERFIL_WSP", est_perfil
         elif huesped_pad:
             via = "PADRON"
 
+        emp_sug_txt = sug_wsp.get("empresa_sugerida") or ""
+        ruc_sug_txt = sug_wsp.get("ruc_sugerido") or ""
+
         if est:
+            # Si la estancia no tenía RUC/empresa pero el perfil WSP o el historial del DNI sí lo tiene
+            if not emp_sug_txt and est.get("dni"):
+                r_hist = conn.execute(
+                    """SELECT ruc, empresa FROM estancias
+                        WHERE TRIM(dni)=? AND LENGTH(TRIM(COALESCE(ruc,'')))=11
+                        ORDER BY ymd_in DESC LIMIT 1""",
+                    (est["dni"],),
+                ).fetchone()
+                if r_hist and r_hist["ruc"]:
+                    ruc_sug_txt = str(r_hist["ruc"]).strip()
+                    emp_h = str(r_hist["empresa"] or "").strip()
+                    emp_sug_txt = f"{emp_h} (RUC {ruc_sug_txt})" if emp_h else f"RUC {ruc_sug_txt}"
+                    sug_wsp["empresa_sugerida"] = emp_sug_txt
+                    sug_wsp["ruc_sugerido"] = ruc_sug_txt
+
             est_sunat, _ = _estado_sunat_texto(conn, est, ent.get("cpe"))
             obs_25 = _observacion_25_texto(est, ent.get("precio_ref"))
-            dni_ruc = est["ruc"] or est["dni"] or ent.get("ruc") or ent.get("dni") or ""
+            dni_ruc = est["ruc"] or est["dni"] or ent.get("ruc") or ent.get("dni") or ruc_sug_txt or ""
             return {
                 "encontrado": True,
                 "via": via,
                 "hab": est["hab"],
                 "huesped": est["huesped"],
+                "empresa": est["empresa"],
                 "dni_ruc": dni_ruc,
                 "dni": est["dni"] or ent.get("dni") or "",
                 "ruc": est["ruc"] or ent.get("ruc") or "",
+                "empresa_sugerida": emp_sug_txt if not est["ruc"] else (f"{est['empresa']} (RUC {est['ruc']})" if est["empresa"] else emp_sug_txt),
+                "ruc_sugerido": ruc_sug_txt if not est["ruc"] else est["ruc"],
                 "check_in": est["check_in"],
                 "check_out": est["check_out"],
                 "tarifa_noches": f"S/ {est['tarifa']:.2f} × {est['noches']} noche(s)",
@@ -811,18 +1033,22 @@ def cruzar_conversacion(
                 "estado_sunat": est_sunat,
                 "observacion_25": obs_25,
                 "entidades": ent,
+                "sugerencia_wsp": sug_wsp,
             }
 
         if huesped_pad:
-            dni_ruc = str(huesped_pad.get("ruc") or huesped_pad.get("dni") or "")
+            dni_ruc = str(huesped_pad.get("ruc") or huesped_pad.get("dni") or ruc_sug_txt or "")
             return {
                 "encontrado": True,
                 "via": via,
                 "hab": ent["habs"][-1] if ent["habs"] else "",
                 "huesped": str(huesped_pad.get("nombre") or ""),
+                "empresa": str(huesped_pad.get("empresa") or ""),
                 "dni_ruc": dni_ruc,
                 "dni": str(huesped_pad.get("dni") or ""),
                 "ruc": str(huesped_pad.get("ruc") or ""),
+                "empresa_sugerida": emp_sug_txt,
+                "ruc_sugerido": ruc_sug_txt,
                 "check_in": "-",
                 "check_out": "-",
                 "tarifa_noches": "Huésped en padrón (sin estancia activa)",
@@ -831,6 +1057,7 @@ def cruzar_conversacion(
                 "estado_sunat": f"CPE {ent['cpe']}" if ent.get("cpe") else "Sin estancia reciente",
                 "observacion_25": "",
                 "entidades": ent,
+                "sugerencia_wsp": sug_wsp,
             }
 
         return {
@@ -838,9 +1065,12 @@ def cruzar_conversacion(
             "via": None,
             "hab": ent["habs"][-1] if ent["habs"] else "",
             "huesped": "",
-            "dni_ruc": ent.get("ruc") or ent.get("dni") or "",
+            "empresa": "",
+            "dni_ruc": ent.get("ruc") or ent.get("dni") or ruc_sug_txt or "",
             "dni": ent.get("dni") or "",
             "ruc": ent.get("ruc") or "",
+            "empresa_sugerida": emp_sug_txt,
+            "ruc_sugerido": ruc_sug_txt,
             "check_in": "",
             "check_out": "",
             "tarifa_noches": "",
@@ -849,9 +1079,13 @@ def cruzar_conversacion(
             "estado_sunat": f"Emitido ({ent['cpe']})" if ent.get("cpe") else "Sin cruce en BD",
             "observacion_25": "",
             "entidades": ent,
+            "sugerencia_wsp": sug_wsp,
         }
     finally:
         conn.close()
+
+
+cruzar = cruzar_conversacion
 
 
 # ---------------------------------------------------------------------------
@@ -936,33 +1170,48 @@ def _recolectar_chats_clientes() -> List[Dict[str, Any]]:
         texto_todo = " \n ".join(_texto_visible(m) for m in recientes if _texto_visible(m))
         cruce = cruzar_conversacion(jid, nombre, texto_todo, ultimo_ts)
 
-        # Si el nombre en WSP era "Ovalo Mariategui" (mensaje iniciado por recepción), enriquecer con huésped cruzado
+        # Si el nombre en WSP era "Ovalo Mariategui" (mensaje iniciado por recepción), enriquecer con destinatario del PDF o huésped cruzado
         nombre_limpio = nombre
-        if nombre_limpio.strip().lower() in ("ovalo mariategui", "") and cruce.get("huesped"):
-            nombre_limpio = cruce["huesped"].title()
-        elif cruce.get("huesped") and _celular9(nombre_limpio) == _celular9(jid):
-            nombre_limpio = cruce["huesped"].title()
+        if nombre_limpio.strip().lower() in ("ovalo mariategui", "") or _celular9(nombre_limpio) == _celular9(jid):
+            m_est = re.search(r"Estimad[oa](?:\(a\))?\s+([^,]+),", texto_todo, re.I)
+            if m_est:
+                nombre_limpio = m_est.group(1).strip().title()
+            elif cruce.get("huesped"):
+                nombre_limpio = cruce["huesped"].title()
 
-        mensajes_ui = [
-            {
-                "hora": _hora_txt(int(m["ts"] or 0)),
-                "es_mio": bool(m["es_mio"]),
-                "texto": _texto_visible(m),
+        mensajes_ui: List[Dict[str, Any]] = []
+        for m in recientes[-MAX_MENSAJES_VISTA:]:
+            vis = _texto_visible(m)
+            if not vis:
+                continue
+            ts_m = int(m["ts"] or 0)
+            es_m = bool(m["es_mio"])
+            if mensajes_ui and mensajes_ui[-1]["es_mio"] == es_m and mensajes_ui[-1]["texto"] == vis and abs(mensajes_ui[-1]["ts"] - ts_m) <= 5:
+                continue
+            mensajes_ui.append({
+                "hora": _hora_txt(ts_m),
+                "es_mio": es_m,
+                "texto": vis,
                 "tipo": str(m["tipo"] or "texto").lower(),
-                "ts": int(m["ts"] or 0),
-            }
-            for m in recientes[-MAX_MENSAJES_VISTA:]
-            if _texto_visible(m)
-        ]
+                "ts": ts_m,
+            })
 
+        sug_publica = {
+            "perfil_wsp": str((cruce.get("sugerencia_wsp") or {}).get("perfil_wsp") or ""),
+            "empresa_sugerida": str((cruce.get("sugerencia_wsp") or {}).get("empresa_sugerida") or ""),
+            "ruc_sugerido": str((cruce.get("sugerencia_wsp") or {}).get("ruc_sugerido") or ""),
+            "estancias_sugeridas": list((cruce.get("sugerencia_wsp") or {}).get("estancias_sugeridas") or []),
+        }
         chats_todos.append({
             "jid": jid,
             "cliente": nombre_limpio,
+            "perfil_wsp": nombre,
             "celular": _celular9(jid),
             "ultimo_ts": ultimo_ts,
             "es_hoy": ultimo_ts >= inicio_hoy,
             "es_48h": ultimo_ts >= (ahora - 48 * 3600),
             "cruce": cruce,
+            "sugerencia_wsp": sug_publica,
             "mensajes_raw": recientes,
             "mensajes": mensajes_ui,
         })
@@ -1070,10 +1319,17 @@ def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
             )
             for m in msgs
         )
+        pidio_comp_cliente = any(
+            any(w in _normalizar(_texto_visible(m))[0].split() for w in ("factura", "boleta", "comprobante"))
+            for m in msgs_cli
+        )
         promesa_comp_abierta = (
             tipo_princ == "COMPROBANTE"
             and not tiene_pdf_enviado
-            and any(bool(_RE_PROMESA_COMP.search(_sin_tildes(_texto_visible(m)))) for m in msgs_rec)
+            and (
+                any(bool(_RE_PROMESA_COMP.search(_sin_tildes(_texto_visible(m)))) for m in msgs_rec)
+                or pidio_comp_cliente
+            )
         )
 
         # 2) ¿El último tramo sin responder es solo un encargo presencial antiguo (> 12 h, ej. "Dele la llave 406")?
@@ -1112,7 +1368,8 @@ def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
                 resumen_msg = " / ".join(_texto_visible(m) for m in sin_resp)[:140]
                 motivo_pendiente = f"Mensaje del cliente sin respuesta de recepción: «{resumen_msg}»."
 
-        cruce_limpio = {k: v for k, v in cruce.items() if k != "entidades"}
+        cruce_limpio = {k: v for k, v in cruce.items() if k not in ("entidades", "sugerencia_wsp")}
+        sug_item = ch.get("sugerencia_wsp") or {"perfil_wsp": "", "empresa_sugerida": "", "estancias_sugeridas": []}
 
         if es_pendiente:
             espera_m = max(0, int((ahora - primer_pend_ts) // 60)) if ch["es_hoy"] else 0
@@ -1126,6 +1383,7 @@ def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "tipo": tipo_princ if tipo_princ in ("COMPROBANTE", "RESERVA", "HABITACION", "PAGO") else "HABITACION",
                 "motivo_pendiente": motivo_pendiente,
                 "cruce": cruce_limpio,
+                "sugerencia_wsp": sug_item,
                 "mensajes": ch["mensajes"],
             })
         else:
@@ -1158,6 +1416,7 @@ def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
                 "que_pidio": que_pidio,
                 "por_que_agradecio": cierre,
+                "sugerencia_wsp": sug_item,
                 "mensajes": ch["mensajes"],
             })
 
@@ -1171,6 +1430,7 @@ def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
                 "tipo_nota": "RECLAMO",
                 "detalle": f"Incidencia reportada por el huésped en el chat: «{txt_cli_all[:130]}».",
+                "sugerencia_wsp": sug_item,
             })
         elif "dele la llave" in norm_cli_all or "le hace pasar" in norm_cli_all or "va preguntar" in norm_cli_all:
             recomendaciones_y_notas.append({
@@ -1181,6 +1441,7 @@ def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
                 "tipo_nota": "ACUERDO",
                 "detalle": f"El huésped autorizó el ingreso de visita y pidió entregar la llave en recepción (Hab {hab or '406'}).",
+                "sugerencia_wsp": sug_item,
             })
         elif "reservado" in norm_rec_all:
             no_bol = " (indicó que NO requiere boleta)" if re.search(r"\bno\b", norm_cli_all.split()[-3:] and " ".join(norm_cli_all.split()[-4:]) or "") else ""
@@ -1192,6 +1453,18 @@ def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
                 "tipo_nota": "ACUERDO",
                 "detalle": f"Reserva confirmada de habitación matrimonial S/ 75 con abono previo por Yape y llegada nocturna{no_bol}.",
+                "sugerencia_wsp": sug_item,
+            })
+        elif "cotizacion" in norm_cli_all or ("proyecto" in norm_cli_all and "personas" in norm_cli_all):
+            recomendaciones_y_notas.append({
+                "jid": ch["jid"],
+                "cliente": cli_label,
+                "celular": ch["celular"],
+                "hab": hab,
+                "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
+                "tipo_nota": "ACUERDO",
+                "detalle": "Negociación de tarifa corporativa/grupal para personal de proyecto (pidió tarifa de cotización y recepción ofreció tarifa especial).",
+                "sugerencia_wsp": sug_item,
             })
         elif "sabia quedarme con 30" in norm_cli_all or "hasta 35" in norm_rec_all:
             recomendaciones_y_notas.append({
@@ -1202,6 +1475,7 @@ def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
                 "tipo_nota": "RECOMENDACION",
                 "detalle": "Cliente frecuente comentó tarifa histórica de S/ 30 en simple; recepción ofreció excepción hasta S/ 35 pero no concretó ingreso.",
+                "sugerencia_wsp": sug_item,
             })
 
     n_p = len(pendientes_responder)
@@ -1343,7 +1617,8 @@ def _hidratar_respuesta_ia(parsed: Dict[str, Any], chats: List[Dict[str, Any]]) 
         sin_resp = [m for m in msgs if not m["es_mio"] and int(m["ts"] or 0) > ult_mio]
         ref_ts = int(sin_resp[0]["ts"] if sin_resp else msgs[-1]["ts"])
         espera_m = max(0, int((ahora - ref_ts) // 60)) if ch["es_hoy"] else 0
-        cruce_limpio = {k: v for k, v in ch["cruce"].items() if k != "entidades"}
+        cruce_limpio = {k: v for k, v in ch["cruce"].items() if k not in ("entidades", "sugerencia_wsp")}
+        sug_item = ch.get("sugerencia_wsp") or {"perfil_wsp": "", "empresa_sugerida": "", "estancias_sugeridas": []}
         tipo_val = str(it.get("tipo") or "HABITACION").upper()
         if tipo_val not in ("COMPROBANTE", "RESERVA", "HABITACION", "PAGO"):
             tipo_val = "HABITACION"
@@ -1357,6 +1632,7 @@ def _hidratar_respuesta_ia(parsed: Dict[str, Any], chats: List[Dict[str, Any]]) 
             "tipo": tipo_val,
             "motivo_pendiente": str(it.get("motivo_pendiente") or ""),
             "cruce": cruce_limpio,
+            "sugerencia_wsp": sug_item,
             "mensajes": ch["mensajes"],
         })
 
@@ -1367,6 +1643,7 @@ def _hidratar_respuesta_ia(parsed: Dict[str, Any], chats: List[Dict[str, Any]]) 
         jid = str(it.get("jid") or "")
         ch = mapa.get(jid)
         cli_label, hab_c = _etiqueta_cliente_hab(ch) if ch else (str(it.get("cliente") or jid), "")
+        sug_item = (ch.get("sugerencia_wsp") if ch else None) or {"perfil_wsp": "", "empresa_sugerida": "", "estancias_sugeridas": []}
         t_nota = str(it.get("tipo_nota") or "ACUERDO").upper()
         if t_nota not in ("ACUERDO", "RECOMENDACION", "RECLAMO"):
             t_nota = "ACUERDO"
@@ -1378,6 +1655,7 @@ def _hidratar_respuesta_ia(parsed: Dict[str, Any], chats: List[Dict[str, Any]]) 
             "hora": _hora_txt(int(ch["mensajes_raw"][-1]["ts"] or 0)) if ch and ch["mensajes_raw"] else "",
             "tipo_nota": t_nota,
             "detalle": str(it.get("detalle") or ""),
+            "sugerencia_wsp": sug_item,
         })
 
     atend_out: List[Dict[str, Any]] = []
@@ -1389,6 +1667,7 @@ def _hidratar_respuesta_ia(parsed: Dict[str, Any], chats: List[Dict[str, Any]]) 
         if not ch:
             continue
         cli_label, hab_c = _etiqueta_cliente_hab(ch)
+        sug_item = ch.get("sugerencia_wsp") or {"perfil_wsp": "", "empresa_sugerida": "", "estancias_sugeridas": []}
         atend_out.append({
             "jid": jid,
             "cliente": str(it.get("cliente") or cli_label),
@@ -1397,6 +1676,7 @@ def _hidratar_respuesta_ia(parsed: Dict[str, Any], chats: List[Dict[str, Any]]) 
             "hora": _hora_txt(int(ch["mensajes_raw"][-1]["ts"] or 0)) if ch["mensajes_raw"] else "",
             "que_pidio": str(it.get("que_pidio") or ""),
             "por_que_agradecio": str(it.get("por_que_agradecio") or ""),
+            "sugerencia_wsp": sug_item,
             "mensajes": ch["mensajes"],
         })
 

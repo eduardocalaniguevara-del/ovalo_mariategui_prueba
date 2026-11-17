@@ -12042,9 +12042,70 @@
            '<span class="font-bold text-right ' + (clsVal || 'text-slate-900') + '">' + wspEsc(txt) + '</span></div>';
   }
 
+  function wspExtraerSugerencia(it) {
+    var sug = (it && it.sugerencia_wsp && typeof it.sugerencia_wsp === 'object') ? it.sugerencia_wsp : {};
+    var raw = (it && it.cruce && typeof it.cruce === 'object') ? it.cruce : {};
+    var perfil = String(sug.perfil_wsp || it.perfil_wsp || '').trim();
+    if (!/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(perfil)) perfil = '';
+    var emp = String(sug.empresa_sugerida || raw.empresa_sugerida || '').trim();
+    var rucSug = String(raw.ruc_sugerido || sug.ruc_sugerido || '').trim();
+    if (rucSug && emp && emp.indexOf(rucSug) < 0) emp += ' (RUC ' + rucSug + ')';
+    else if (rucSug && !emp) emp = 'RUC ' + rucSug;
+    var cands = Array.isArray(sug.estancias_sugeridas) ? sug.estancias_sugeridas : [];
+    return { perfil: perfil, empresa: emp, estancias: cands };
+  }
+
+  function wspRenderEstanciasSugeridas(cands) {
+    if (!cands || !cands.length) return '';
+    var h = '<div class="mt-2 rounded-lg border border-amber-300 bg-amber-50/80 px-2.5 py-2 text-[11px] text-amber-950 space-y-1">' +
+            '<div class="font-black text-amber-900">💡 Posible huésped según nombre de WhatsApp:</div>';
+    cands.slice(0, 3).forEach(function (c) {
+      var partes = [];
+      if (c.huesped) partes.push(String(c.huesped));
+      if (c.dni) partes.push('DNI ' + c.dni);
+      if (c.hab) partes.push('Hab ' + c.hab);
+      if (c.fecha) partes.push(String(c.fecha));
+      if (c.pagado !== undefined && c.pagado !== null && c.pagado !== '') partes.push('Pagado ' + wspMontoTexto(c.pagado));
+      if (c.empresa) partes.push(String(c.empresa) + (c.ruc ? ' (' + c.ruc + ')' : ''));
+      else if (c.ruc) partes.push('RUC ' + c.ruc);
+      h += '<div class="bg-white/90 border border-amber-200 rounded px-2 py-1 font-semibold text-slate-800">• ' + wspEsc(partes.join(' · ')) + '</div>';
+    });
+    h += '</div>';
+    return h;
+  }
+
+  function wspRenderSugerenciaCompacta(it) {
+    var sg = wspExtraerSugerencia(it);
+    var cliente = String((it && it.cliente) || '');
+    var mostrarPerfil = sg.perfil && sg.perfil.toLowerCase() !== cliente.toLowerCase();
+    var cand0 = null;
+    if (sg.estancias.length && sg.estancias[0] && sg.estancias[0].huesped) {
+      var h0 = String(sg.estancias[0].huesped);
+      if (!it.hab || cliente.toLowerCase().indexOf(h0.toLowerCase()) < 0) cand0 = sg.estancias[0];
+    }
+    if (!mostrarPerfil && !sg.empresa && !cand0) return '';
+    var h = '<div class="flex flex-wrap items-center gap-1.5 pt-0.5">';
+    if (mostrarPerfil) {
+      h += '<span class="text-[10.5px] font-bold px-2 py-0.5 rounded bg-indigo-50 text-indigo-900 border border-indigo-200">' +
+           '👤 Perfil WSP: ' + wspEsc(sg.perfil) + '</span>';
+    }
+    if (sg.empresa) {
+      h += '<span class="text-[10.5px] font-black px-2 py-0.5 rounded bg-indigo-100 text-indigo-950 border border-indigo-300">' +
+           '🏢 Empresa/RUC sugerido por nombre WSP: ' + wspEsc(sg.empresa) + '</span>';
+    }
+    if (cand0 && cand0.huesped) {
+      var infoCand = cand0.huesped + (cand0.hab ? ' · Hab ' + cand0.hab : '') + (cand0.dni ? ' · DNI ' + cand0.dni : '') + (cand0.fecha ? ' · ' + cand0.fecha : '');
+      h += '<span class="text-[10.5px] font-bold px-2 py-0.5 rounded bg-amber-50 text-amber-950 border border-amber-300">' +
+           '💡 Posible huésped: ' + wspEsc(infoCand) + '</span>';
+    }
+    h += '</div>';
+    return h;
+  }
+
   function wspRenderCrucePendiente(it) {
     var raw = it.cruce || {};
     var est = raw.estancia || {};
+    var sg = wspExtraerSugerencia(it);
     var hab = raw.hab || est.hab || '';
     var huesped = raw.huesped || est.huesped || '';
     var dniRuc = raw.dni_ruc || [raw.dni || est.dni, raw.ruc || est.ruc].filter(Boolean).join(' / ');
@@ -12058,17 +12119,28 @@
     var estadoSunat = raw.estado_sunat || [est.tipo_comp, est.estado_comp, est.nro_comp].filter(Boolean).join(' · ');
     var obs25 = raw.observacion_25 || '';
     var via = raw.via || '';
+    var viaUpper = String(via).toUpperCase();
     var encontrado = (typeof raw.encontrado === 'boolean') ? raw.encontrado : Boolean(hab || huesped || dniRuc);
 
     var h = '<div class="flex items-center justify-between mb-1.5">' +
             '<span class="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">Ficha cruzada (Estancia / SUNAT)</span>' +
             (encontrado
-              ? '<span class="text-[10px] font-black px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-900 border border-indigo-300">' + wspEsc(via ? 'vía ' + via : 'cruzado') + '</span>'
-              : '<span class="text-[10px] font-black px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200">sin coincidencia</span>') +
+              ? '<span class="text-[10px] font-black px-1.5 py-0.5 rounded border ' +
+                (viaUpper === 'PERFIL_WSP' ? 'bg-violet-100 text-violet-900 border-violet-300' : 'bg-indigo-100 text-indigo-900 border-indigo-300') + '">' +
+                wspEsc(viaUpper === 'PERFIL_WSP' ? '👤 vía PERFIL WSP' : (via ? 'vía ' + via : 'cruzado')) + '</span>'
+              : '<span class="text-[10px] font-black px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200">sin coincidencia directa</span>') +
             '</div>';
 
     if (!encontrado) {
-      h += '<div class="text-[11px] text-slate-500 italic py-2">No se encontró estancia activa o reciente asociada a este celular ni a los datos mencionados.</div>';
+      if (sg.empresa) {
+        h += '<div class="mb-2 rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-1.5 text-[11px] text-indigo-950">' +
+             '<span class="font-black">🏢 Empresa/RUC sugerido por nombre WSP:</span> ' + wspEsc(sg.empresa) + '</div>';
+      }
+      if (sg.estancias.length) {
+        h += wspRenderEstanciasSugeridas(sg.estancias);
+      } else if (!sg.empresa) {
+        h += '<div class="text-[11px] text-slate-500 italic py-2">No se encontró estancia activa o reciente asociada a este celular ni al nombre de perfil.</div>';
+      }
       return h;
     }
 
@@ -12085,6 +12157,14 @@
     h += wspFilaFicha('Saldo', wspMontoTexto(saldo), clsSaldo);
     h += wspFilaFicha('Estado SUNAT', estadoSunat);
     h += '</div>';
+
+    if (sg.empresa) {
+      h += '<div class="mt-2 rounded-lg border border-indigo-300 bg-indigo-50 px-2.5 py-1.5 text-[11px] text-indigo-950">' +
+           '<span class="font-black">🏢 Empresa/RUC sugerido por nombre WSP:</span> ' + wspEsc(sg.empresa) + '</div>';
+    }
+    if (viaUpper === 'PERFIL_WSP' && sg.estancias.length > 1) {
+      h += wspRenderEstanciasSugeridas(sg.estancias);
+    }
 
     if (obs25) {
       var obsConforme = String(obs25).toLowerCase().indexOf('conforme') >= 0;
@@ -12125,12 +12205,13 @@
       var hora = it.hora_ultimo_msg || it.hora || '';
       var espMin = (it.espera_min !== undefined && it.espera_min !== null && it.espera_min !== '') ? wspNum(it.espera_min) : null;
       var msgs = Array.isArray(it.mensajes) ? it.mensajes : [];
+      var sg = wspExtraerSugerencia(it);
 
       h += '<div class="bg-white rounded-xl border-2 border-rose-300 shadow-xs grid grid-cols-1 lg:grid-cols-2 overflow-hidden">';
       // Izquierda: contexto del Agente + mensajes desplegables
       h += '<div class="p-3.5 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col justify-between">';
       h += '<div>';
-      h += '<div class="flex flex-wrap items-center gap-1.5 mb-2">';
+      h += '<div class="flex flex-wrap items-center gap-1.5 mb-1.5">';
       h += '<span class="font-black text-[13px] text-slate-900">' + wspEsc(cliente) + '</span>';
       if (celular && cliente.indexOf(celular) < 0) {
         h += '<span class="text-[10.5px] font-mono text-slate-500">📱 ' + wspEsc(celular) + '</span>';
@@ -12141,6 +12222,11 @@
              (espMin !== null && espMin > 0 ? ' · hace ' + espMin + ' min' : '') + '</span>';
       }
       h += '</div>';
+      var mostrarPerfilPend = sg.perfil && (sg.perfil.toLowerCase() !== String(cliente).toLowerCase() || Boolean(sg.empresa) || sg.estancias.length > 0);
+      if (mostrarPerfilPend) {
+        h += '<div class="mb-2"><span class="inline-flex items-center gap-1 text-[10.5px] font-bold px-2 py-0.5 rounded bg-indigo-50 text-indigo-900 border border-indigo-200">' +
+             '👤 Perfil WSP: ' + wspEsc(sg.perfil) + '</span></div>';
+      }
       h += '<div class="rounded-lg bg-rose-50/70 border border-rose-200 px-3 py-2 text-[12px] text-slate-800 leading-relaxed">' +
            '<span class="font-black text-rose-900">Motivo pendiente: </span>' + wspEsc(it.motivo_pendiente || 'Pendiente de revisión por Recepción.') + '</div>';
       h += '</div>';
@@ -12194,6 +12280,7 @@
         h += '<span class="ml-auto text-[10.5px] font-semibold text-slate-500">🕒 ' + wspEsc(it.hora) + '</span>';
       }
       h += '</div>';
+      h += wspRenderSugerenciaCompacta(it);
       h += '<div class="text-[12px] text-slate-800 leading-relaxed">' + wspEsc(it.detalle || '') + '</div>';
       if (Array.isArray(it.mensajes) && it.mensajes.length) {
         h += '<details class="wsp-details mt-1">' +
@@ -12243,6 +12330,7 @@
         h += '<span class="text-[10.5px] font-semibold text-slate-400">🕒 ' + wspEsc(hora) + '</span>';
       }
       h += '</div>';
+      h += wspRenderSugerenciaCompacta(it);
       h += '<div class="text-[11.5px] text-slate-700"><span class="font-black text-slate-900">Qué pidió:</span> ' + wspEsc(it.que_pidio || '—') + '</div>';
       h += '<div class="text-[11.5px] text-emerald-900"><span class="font-black">Cierre / Por qué agradeció:</span> ' + wspEsc(it.por_que_agradecio || '—') + '</div>';
       h += '</div>';

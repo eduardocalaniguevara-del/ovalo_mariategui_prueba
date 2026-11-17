@@ -420,15 +420,31 @@ async function startWhatsApp() {
   });
 
   const getPending = db.prepare(`SELECT * FROM wsp_recepcion_cola_envio WHERE estado = 'PENDIENTE' ORDER BY id ASC LIMIT 5`);
+  const claimPending = db.prepare(`UPDATE wsp_recepcion_cola_envio SET estado = 'ENVIANDO' WHERE id = ? AND estado = 'PENDIENTE'`);
   const markSent = db.prepare(`UPDATE wsp_recepcion_cola_envio SET estado = 'ENVIADO', enviado_en = ? WHERE id = ?`);
+  const markAlreadySent = db.prepare(`UPDATE wsp_recepcion_cola_envio SET estado = 'YA_ENVIADO_PREVIO', enviado_en = ?, detalle_error = ? WHERE id = ?`);
   const markErr = db.prepare(`UPDATE wsp_recepcion_cola_envio SET estado = 'ERROR', detalle_error = ? WHERE id = ?`);
+  const checkRecentSentCpe = db.prepare(`
+    SELECT 1 FROM wsp_recepcion_mensajes
+     WHERE COALESCE(chat_jid, jid) = ?
+       AND (COALESCE(es_mio, 0) = 1 OR COALESCE(desde_recepcion, 0) = 1)
+       AND COALESCE(timestamp_unix, timestamp, 0) >= ?
+       AND UPPER(COALESCE(texto, '')) LIKE ?
+     LIMIT 1
+  `);
 
+  let queueBusy = false;
   queueTimer = setInterval(async () => {
-    if (!isConnected) return;
+    if (queueBusy || !isConnected) return;
+    queueBusy = true;
     try {
       const rows = getPending.all();
       for (const r of rows) {
         try {
+          const claimRes = claimPending.run(r.id);
+          if (!claimRes || Number(claimRes.changes || 0) === 0) {
+            continue;
+          }
           let jid = (r.telefono_o_jid || r.destino_telefono || '').trim();
           if (!jid.includes('@')) {
             jid = jid.replace(/\D/g, '');
@@ -437,6 +453,17 @@ async function startWhatsApp() {
           }
           const rutaAdj = r.ruta_adjunto || r.archivo_ruta;
           const textoMsg = r.mensaje || r.texto || '';
+          const cpeMatch = String(r.nro_comprobante || textoMsg || rutaAdj || '').match(/((?:E001|EB01|F\d{3}|B\d{3})-\d+)/i);
+          if (cpeMatch) {
+            const cpeCode = cpeMatch[1].toUpperCase();
+            const minTs = Math.floor(Date.now() / 1000) - 1800;
+            const dup = checkRecentSentCpe.get(jid, minTs, `%${cpeCode}%`);
+            if (dup) {
+              markAlreadySent.run(formatLocalIso(), `Ya enviado previamente (${cpeCode}) en los últimos 30 min`, r.id);
+              triggerSupabasePush();
+              continue;
+            }
+          }
           let sentMsg = null;
           if (rutaAdj && fs.existsSync(rutaAdj)) {
             const ext = path.extname(rutaAdj).toLowerCase();
@@ -461,7 +488,10 @@ async function startWhatsApp() {
           triggerSupabasePush();
         }
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      queueBusy = false;
+    }
   }, 2500);
 }
 
