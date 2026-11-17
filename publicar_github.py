@@ -7,9 +7,12 @@ Publicador automático a GitHub usando la credencial nativa de Windows Credentia
 
 import ctypes
 import ctypes.wintypes as wt
+import json
+import re
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -50,6 +53,13 @@ class _CREDENTIAL(ctypes.Structure):
     ]
 
 
+def _extraer_token_limpio(blob: str) -> str:
+    m = re.search(r"(gh[opusr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|[a-f0-9]{40})", blob or "")
+    if m:
+        return m.group(1)
+    return (blob or "").strip()
+
+
 def _obtener_credencial_windows() -> tuple[str, str]:
     advapi32 = ctypes.windll.advapi32
     for default_user, target in CRED_TARGETS:
@@ -65,9 +75,38 @@ def _obtener_credencial_windows() -> tuple[str, str]:
             if uname in ("PersonalAccessToken", "oauth2", ""):
                 uname = default_user
             advapi32.CredFree(pcred)
-            if blob:
-                return uname, blob
+            tok = _extraer_token_limpio(blob)
+            if tok:
+                return uname, tok
     return "", ""
+
+
+def _aceptar_invitaciones_pendientes(token: str) -> None:
+    if not token:
+        return
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "OvaloPruebaUpdater",
+    }
+    try:
+        req = urllib.request.Request("https://api.github.com/user/repository_invitations", headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            invs = json.loads(r.read().decode("utf-8"))
+        for inv in invs or []:
+            iid = inv.get("id")
+            if iid:
+                req_p = urllib.request.Request(
+                    f"https://api.github.com/user/repository_invitations/{iid}",
+                    headers=headers,
+                    method="PATCH",
+                )
+                try:
+                    urllib.request.urlopen(req_p, timeout=10).close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 def _obtener_token_windows() -> str:
@@ -88,8 +127,9 @@ def _asegurar_identidad_git() -> None:
 
 def publicar(mensaje: str = "Actualizacion automatica del sistema") -> None:
     gh_user, token = _obtener_credencial_windows()
+    _aceptar_invitaciones_pendientes(token)
     public_url = f"https://{REPO_SLUG}"
-    push_url = f"https://{gh_user}:{token}@{REPO_SLUG}" if token else public_url
+    push_url = f"https://x-access-token:{token}@{REPO_SLUG}" if token else public_url
 
     git_dir = BASE_DIR / ".git"
     if not git_dir.exists():
