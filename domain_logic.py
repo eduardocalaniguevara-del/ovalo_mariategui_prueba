@@ -6872,24 +6872,15 @@ def _inyectar_rutas_en_servidor_activo() -> None:
                         import contabilidad_logic as cl
                         datos_c = cl.obtener_datos_contabilidad_local("2026-11")
                         res = [r for r in datos_c.get("calzado_rows", []) if r.get("es_inexacto")]
-                    elif method_name == "consultarAsistenteRecepcion":
-                        import asistente_recepcion as ar
-                        a0 = args[0] if args and isinstance(args[0], dict) else {"pregunta": str(args[0] if args else "")}
-                        res = ar.consultar_asistente_recepcion_local(a0)
-                    elif method_name == "confirmarMovimientoAsistente":
-                        import asistente_recepcion as ar
-                        a0 = args[0] if args else {}
-                        if isinstance(a0, dict):
-                            p_id = str(a0.get("propuestaId") or a0.get("propuesta_id") or "")
-                            rec = str(a0.get("recepcionista") or "")
-                        else:
-                            p_id = str(a0 or "")
-                            rec = str(args[1] if len(args) > 1 else "")
-                        res = ar.confirmar_movimiento_asistente_local(p_id, rec)
-                    elif method_name == "obtenerExtractoDuenoAsistente":
-                        import asistente_recepcion as ar
-                        a0 = args[0] if args and isinstance(args[0], dict) else {}
-                        res = ar.obtener_extracto_dueno_asistente_local(a0)
+                    elif method_name == "obtenerAlertasWsp":
+                        import wsp_inteligencia as wi
+                        res = wi.obtener_alertas_wsp()
+                    elif method_name == "obtenerBandejaWsp":
+                        import wsp_inteligencia as wi
+                        res = wi.obtener_bandeja_wsp()
+                    elif method_name == "actualizarResumenWspAhora":
+                        import wsp_inteligencia as wi
+                        res = wi.ejecutar_analisis_agente_wsp(forzar=True)
                     else:
                         raise HTTPException(status_code=404, detail=f"Método RPC no soportado: {method_name}")
 

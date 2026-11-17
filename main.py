@@ -135,17 +135,17 @@ def _background_sync_worker() -> None:
 
 
 def _background_wsp_worker() -> None:
-    """Cada 30 s: auto-adelanto de reservas (envíos SIMULADOS en la prueba) y, SOLO si no es MODO_PRUEBA,
-    vigilante del daemon de WhatsApp (relanza node wsp_daemon.js si no hay proceso)."""
+    """Reloj programado del Resumen Ejecutivo WSP (08:00, 13:00, 19:00, 23:00 + corte inicial si la tabla
+    está vacía) y, SOLO fuera de MODO_PRUEBA, vigilante del daemon wsp_daemon.js."""
     try:
         import wsp_inteligencia as _wi0
-        _wi0.libres_hoy()  # precalienta la caché de habitaciones libres
+        _wi0.tick_resumen_programado()
     except Exception as exc:
-        print(f"[OvaloWspWorker] precarga: {exc}")
+        print(f"[OvaloWspWorker] corte inicial: {exc}")
     while not _sync_stop_event.wait(timeout=30):
         try:
             import wsp_inteligencia as wi
-            wi.tick_auto_adelanto()
+            wi.tick_resumen_programado()
             if not MODO_PRUEBA:
                 wi.vigilar_daemon()
         except Exception as exc:
@@ -821,47 +821,16 @@ def api_rpc_handler(method_name: str, body: RpcPayload):
             import contabilidad_logic as cl
             datos_c = cl.obtener_datos_contabilidad_local("2026-11")
             res = [r for r in datos_c.get("calzado_rows", []) if r.get("es_inexacto")]
-        elif method_name == "consultarAsistenteRecepcion":
-            import asistente_recepcion as ar
-            a0 = args[0] if args and isinstance(args[0], dict) else {"pregunta": str(args[0] if args else "")}
-            res = ar.consultar_asistente_recepcion_local(a0)
-        # --- Visor de WhatsApp en vivo (wsp_inteligencia.py) ---
+        # --- Resumen Ejecutivo de WhatsApp 100% Solo Lectura (wsp_inteligencia.py) ---
         elif method_name == "obtenerAlertasWsp":
             import wsp_inteligencia as wi
             res = wi.obtener_alertas_wsp()
         elif method_name == "obtenerBandejaWsp":
             import wsp_inteligencia as wi
-            res = wi.obtener_bandeja_completa(str(args[0] if args else "PENDIENTES"))
-        elif method_name == "enviarRespuestaWsp":
+            res = wi.obtener_bandeja_wsp()
+        elif method_name == "actualizarResumenWspAhora":
             import wsp_inteligencia as wi
-            a0 = args[0] if args and isinstance(args[0], dict) else {}
-            res = wi.enviar_respuesta(a0.get("jid", ""), a0.get("texto", ""), a0.get("plantilla", ""), a0.get("usuario", ""))
-        elif method_name == "marcarChatWspAtendido":
-            import wsp_inteligencia as wi
-            a0 = args[0] if args and isinstance(args[0], dict) else {}
-            res = wi.marcar_atendido(a0.get("jid", ""), a0.get("usuario", ""))
-        elif method_name == "configurarAutoAdelantoWsp":
-            import wsp_inteligencia as wi
-            a0 = args[0] if args and isinstance(args[0], dict) else {}
-            res = wi.configurar_auto_adelanto(bool(a0.get("activo")), a0.get("usuario", ""))
-        elif method_name == "simularMensajeWsp":
-            import wsp_inteligencia as wi
-            a0 = args[0] if args and isinstance(args[0], dict) else {}
-            res = wi.simular_mensaje(a0.get("jid", "SIM-999999999"), a0.get("nombre", "Cliente Prueba"), a0.get("texto", ""))
-        elif method_name == "confirmarMovimientoAsistente":
-            import asistente_recepcion as ar
-            a0 = args[0] if args else {}
-            if isinstance(a0, dict):
-                p_id = str(a0.get("propuestaId") or a0.get("propuesta_id") or "")
-                rec = str(a0.get("recepcionista") or "")
-            else:
-                p_id = str(a0 or "")
-                rec = str(args[1] if len(args) > 1 else "")
-            res = ar.confirmar_movimiento_asistente_local(p_id, rec)
-        elif method_name == "obtenerExtractoDuenoAsistente":
-            import asistente_recepcion as ar
-            a0 = args[0] if args and isinstance(args[0], dict) else {}
-            res = ar.obtener_extracto_dueno_asistente_local(a0)
+            res = wi.ejecutar_analisis_agente_wsp(forzar=True)
         else:
             raise HTTPException(status_code=404, detail=f"Método RPC no soportado: {method_name}")
 

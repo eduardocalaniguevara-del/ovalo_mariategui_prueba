@@ -146,7 +146,7 @@
       line-height: 1.35;
     }
     /* =========================================================================
-       VISOR WSP EN VIVO (barra superior) + MODAL BANDEJA WSP
+       VISOR WSP SOLO LECTURA (barra superior) + MODAL RESUMEN EJECUTIVO IA
        ========================================================================= */
     #wspBarraPestanas > button,
     #wspBarraPestanas #tabVistaEstanciasBD {
@@ -163,16 +163,11 @@
     #wspTicker.wsp-nivel-ROJO:hover { background: #B91C1C; }
     #wspTicker.wsp-nivel-SIN_CONEXION { background: #E2E8F0; border-color: #94A3B8; color: #334155; }
     #wspTicker.wsp-nivel-ERROR { background: #F8FAFC; border-color: #E2E8F0; color: #94A3B8; font-weight: 600; }
-    #wspTickerTexto { transition: opacity 0.25s ease; }
-    #wspTickerTexto.wsp-fade { opacity: 0.15; }
-    #modalWspBandeja .wsp-burbuja { max-width: 85%; white-space: pre-wrap; word-break: break-word; }
+    #modalWspBandeja .wsp-burbuja { max-width: 88%; white-space: pre-wrap; word-break: break-word; }
     #modalWspBandeja .wsp-burbuja-cli { background: #F1F5F9; border: 1px solid #E2E8F0; color: #0F172A; border-radius: 10px 10px 10px 2px; }
     #modalWspBandeja .wsp-burbuja-rec { background: #DCFCE7; border: 1px solid #BBF7D0; color: #14532D; border-radius: 10px 10px 2px 10px; margin-left: auto; }
-    #modalWspBandeja .wsp-tab-activa { background: #1E293B; color: #FFFFFF; }
-    #modalWspBandeja .wsp-switch { position: relative; width: 34px; height: 18px; border-radius: 999px; background: #CBD5E1; transition: background .2s; flex-shrink: 0; }
-    #modalWspBandeja .wsp-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 999px; background: #FFFFFF; transition: left .2s; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
-    #modalWspBandeja .wsp-switch.wsp-on { background: #16A34A; }
-    #modalWspBandeja .wsp-switch.wsp-on::after { left: 18px; }
+    #modalWspBandeja details.wsp-details > summary { list-style: none; cursor: pointer; user-select: none; }
+    #modalWspBandeja details.wsp-details > summary::-webkit-details-marker { display: none; }
   </style>
 </head>
 <body class="h-screen flex flex-col text-slate-800 p-1.5 sm:p-2 text-xs overflow-hidden" style="background-color: #F7EFEA;">
@@ -324,14 +319,14 @@
       </button>
     </div>
 
-    <!-- VISOR EN VIVO WSP (centro de la barra): pendientes del WhatsApp de Recepción -->
+    <!-- VISOR RESUMEN EJECUTIVO WSP (centro de la barra, 100 % solo lectura) -->
     <button type="button" id="wspTicker" onclick="abrirModalWspBandeja()"
             class="wsp-ticker wsp-nivel-INICIAL flex-1 min-w-[220px] max-w-[560px] mx-auto h-[28px] rounded-lg border px-2 flex items-center gap-2 text-xs font-black overflow-hidden cursor-pointer transition-colors"
-            title="Mensajes de WhatsApp de Recepción — clic para ver todos">
+            title="Resumen Ejecutivo de WhatsApp (solo lectura) — clic para abrir los 3 bloques">
       <span id="wspTickerIcono" class="shrink-0">💬</span>
       <span id="wspTickerBadge" class="shrink-0 px-1.5 rounded bg-white/90 text-slate-800 hidden">0</span>
-      <span id="wspTickerTexto" class="truncate min-w-0">WhatsApp: conectando…</span>
-      <span id="wspTickerEspera" class="ml-auto shrink-0"></span>
+      <span id="wspTickerTexto" class="truncate min-w-0">WSP: cargando resumen…</span>
+      <span id="wspTickerEspera" class="ml-auto shrink-0 text-[10.5px] font-bold"></span>
     </button>
 
     <!-- Botones de Visita y Cuentas por Habitación exactamente encima del carrito 🛒 de Venta Tienda -->
@@ -11621,540 +11616,86 @@
 })();
 </script>
 
-<!-- =========================================================================
-     🤖 COPILOTO ÓVALO — ASISTENTE OPERATIVO DE RECEPCIÓN + CONTROL ARNÉS² GR-09
-     ========================================================================= -->
-<style>
-  #copiloto-fab {
-    position: fixed;
-    right: 22px;
-    bottom: 22px;
-    z-index: 9998;
-    background: linear-gradient(135deg, #0284c7, #1d4ed8);
-    color: #fff;
-    border: 2px solid #bae6fd;
-    border-radius: 999px;
-    padding: 11px 18px;
-    font-size: 14px;
-    font-weight: 700;
-    cursor: pointer;
-    box-shadow: 0 8px 24px rgba(2, 132, 199, 0.38);
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-  }
-  #copiloto-fab:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 12px 28px rgba(2, 132, 199, 0.5);
-  }
-  #copiloto-drawer {
-    position: fixed;
-    right: 22px;
-    bottom: 78px;
-    width: 430px;
-    max-width: calc(100vw - 32px);
-    height: 610px;
-    max-height: calc(100vh - 110px);
-    z-index: 9999;
-    background: #ffffff;
-    border: 1px solid #cbd5e1;
-    border-radius: 16px;
-    box-shadow: 0 20px 45px rgba(15, 23, 42, 0.28);
-    display: none;
-    flex-direction: column;
-    overflow: hidden;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  }
-  #copiloto-header {
-    background: linear-gradient(135deg, #0f172a, #1e3a8a);
-    color: #ffffff;
-    padding: 12px 14px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-  .copiloto-chip {
-    border: 1px solid #cbd5e1;
-    background: #f8fafc;
-    color: #0f172a;
-    border-radius: 8px;
-    padding: 5px 9px;
-    font-size: 11.5px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.12s;
-  }
-  .copiloto-chip:hover {
-    background: #e0f2fe;
-    border-color: #38bdf8;
-  }
-  .copiloto-msg-user {
-    align-self: flex-end;
-    background: #dbeafe;
-    color: #1e3a8a;
-    border-radius: 12px 12px 2px 12px;
-    padding: 8px 12px;
-    max-width: 85%;
-    font-size: 13px;
-    font-weight: 500;
-  }
-  .copiloto-msg-bot {
-    align-self: flex-start;
-    background: #ffffff;
-    color: #0f172a;
-    border: 1px solid #e2e8f0;
-    border-radius: 12px 12px 12px 2px;
-    padding: 10px 12px;
-    width: 96%;
-    font-size: 13px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-  }
-  .copiloto-btn-confirm {
-    margin-top: 8px;
-    width: 100%;
-    background: #16a34a;
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    padding: 9px 12px;
-    font-size: 12.5px;
-    font-weight: 700;
-    cursor: pointer;
-  }
-  .copiloto-btn-confirm:hover {
-    background: #15803d;
-  }
-  #copiloto-modal-dueno {
-    position: fixed;
-    inset: 0;
-    background: rgba(15, 23, 42, 0.55);
-    z-index: 10000;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    padding: 16px;
-  }
-</style>
-
-<button id="copiloto-fab" onclick="window.toggleCopilotoOvalo()" title="Abrir Asistente Operativo de Recepción">
-  <span>🤖 Copiloto Óvalo</span>
-</button>
-
-<div id="copiloto-drawer">
-  <div id="copiloto-header">
-    <div>
-      <div style="font-size:14.5px;font-weight:800;display:flex;align-items:center;gap:6px;">
-        🤖 Copiloto Óvalo <span style="font-size:10px;background:#22c55e;color:#052e16;padding:1px 6px;border-radius:99px;font-weight:700;">Arnés² GR-09</span>
-      </div>
-      <div style="font-size:11px;color:#cbd5e1;margin-top:2px;">Asistente de Recepción (Cuentas · Yapes · WSP · Vitrina)</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:6px;">
-      <button onclick="window.abrirExtractoDuenoCopiloto()" style="background:#f59e0b;color:#fff;border:none;border-radius:6px;padding:4px 8px;font-size:11px;font-weight:700;cursor:pointer;" title="Ver bitácora y Extracto del Dueño">📋 Extracto Dueño</button>
-      <button onclick="window.toggleCopilotoOvalo()" style="background:transparent;color:#fff;border:1px solid #475569;border-radius:6px;padding:3px 8px;font-size:13px;cursor:pointer;">✕</button>
-    </div>
-  </div>
-
-  <!-- Barra de Recepcionista en Turno -->
-  <div style="background:#f1f5f9;padding:8px 12px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;justify-content:space-between;font-size:12px;">
-    <span style="font-weight:600;color:#334155;">👩‍💼 Recepcionista en turno:</span>
-    <select id="copiloto-select-recep" onchange="localStorage.setItem('copiloto_recepcionista', this.value)" style="border:1px solid #94a3b8;border-radius:6px;padding:3px 8px;font-size:12px;font-weight:700;color:#0f172a;background:#fff;">
-      <option value="Eleisa">Eleisa (Turno Día)</option>
-      <option value="Eliana">Eliana (Turno Día)</option>
-      <option value="Yolyi">Yolyi (Turno Noche)</option>
-    </select>
-  </div>
-
-  <!-- 5 Botones Rápidos -->
-  <div style="padding:8px 10px;background:#ffffff;border-bottom:1px solid #e2e8f0;display:flex;flex-wrap:wrap;gap:5px;">
-    <button class="copiloto-chip" onclick="window.accionRapidaCopiloto('wsp_comprobantes')">📄 WSP Comprobantes</button>
-    <button class="copiloto-chip" onclick="window.accionRapidaCopiloto('faltantes_vitrina')">🥤 Faltantes Vitrina</button>
-    <button class="copiloto-chip" onclick="window.accionRapidaCopiloto('yapes_hoy')">📱 Yapes de Hoy</button>
-    <button class="copiloto-chip" onclick="window.accionRapidaCopiloto('guia_fotos')">📸 Guía con Fotos</button>
-    <button class="copiloto-chip" onclick="window.plantillaMovimientoCopiloto()">⚡ Haz un movimiento por mí</button>
-    <button class="copiloto-chip" onclick="window.accionRapidaCopiloto('cuadre_turno')">💰 Cuadre Turno</button>
-  </div>
-
-  <!-- Historial del Chat -->
-  <div id="copiloto-chat-body" style="flex:1;overflow-y:auto;padding:12px;background:#f8fafc;display:flex;flex-direction:column;gap:10px;">
-    <div class="copiloto-msg-bot">
-      <div style="font-weight:700;color:#0f172a;margin-bottom:4px;">👋 ¡Hola! Soy el Copiloto de Óvalo Mariátegui</div>
-      <div style="font-size:12.5px;color:#334155;">
-        Estoy listo para ayudar a <b>Eleisa</b>, <b>Eliana</b> y <b>Yolyi</b>.<br>
-        • Escribe un cuarto (ej. <code>201</code> o <code>301</code>) para ver su cuenta.<br>
-        • Pídeme un cambio (ej. <code>Cambia la 302 a la 201 de la fecha 13</code>): si está ocupada, te avisaré para intercambiarlas.<br>
-        • Pulsa <b>🥤 Faltantes Vitrina</b> para ver qué falta y desde qué turno.
-      </div>
-    </div>
-  </div>
-
-  <!-- Entrada de texto -->
-  <div style="padding:10px;background:#ffffff;border-top:1px solid #cbd5e1;display:flex;gap:6px;">
-    <input id="copiloto-input" type="text" placeholder="Escribe tu consulta o movimiento (ej. 201, vitrina, cambia 302 a 201)..."
-           onkeydown="if(event.key==='Enter'){window.enviarPreguntaCopiloto();}"
-           style="flex:1;border:1px solid #94a3b8;border-radius:8px;padding:8px 10px;font-size:13px;outline:none;" />
-    <button onclick="window.enviarPreguntaCopiloto()" style="background:#0284c7;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;">Enviar</button>
-  </div>
-</div>
-
-<!-- Modal Extracto del Dueño -->
-<div id="copiloto-modal-dueno">
-  <div style="background:#fff;border-radius:14px;width:880px;max-width:96vw;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 48px rgba(0,0,0,0.3);">
-    <div style="background:#0f172a;color:#fff;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;">
-      <div>
-        <div style="font-size:15px;font-weight:800;">📋 Extracto del Dueño — Bitácora del Copiloto y Seguridad Arnés² (GR-09)</div>
-        <div style="font-size:11.5px;color:#94a3b8;">Movimientos ejecutados por recepcionistas (Antes/Después) e intentos bloqueados por confidencialidad</div>
-      </div>
-      <button onclick="document.getElementById('copiloto-modal-dueno').style.display='none'" style="background:transparent;color:#fff;border:1px solid #475569;border-radius:6px;padding:4px 10px;cursor:pointer;">Cerrar ✕</button>
-    </div>
-    <div style="padding:10px 16px;background:#f1f5f9;border-bottom:1px solid #cbd5e1;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:12.5px;">
-      <div id="copiloto-dueno-kpis" style="display:flex;gap:12px;font-weight:700;"></div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <select id="copiloto-dueno-filtro-rec" onchange="window.cargarExtractoDuenoCopiloto()" style="padding:4px 8px;border-radius:6px;border:1px solid #94a3b8;">
-          <option value="">Todas las recepcionistas</option>
-          <option value="Eleisa">Eleisa</option>
-          <option value="Eliana">Eliana</option>
-          <option value="Yolyi">Yolyi</option>
-        </select>
-        <select id="copiloto-dueno-filtro-tipo" onchange="window.cargarExtractoDuenoCopiloto()" style="padding:4px 8px;border-radius:6px;border:1px solid #94a3b8;">
-          <option value="">Todos los registros</option>
-          <option value="MOVIMIENTO_EJECUTADO">⚡ Movimientos Ejecutados</option>
-          <option value="INTENTO_BLOQUEADO_GR09">🛡️ Bloqueos GR-09</option>
-          <option value="CONSULTA">🔍 Consultas</option>
-        </select>
-      </div>
-    </div>
-    <div id="copiloto-dueno-tabla" style="padding:14px;overflow-y:auto;flex:1;font-size:12.5px;"></div>
-  </div>
-</div>
-
-<script>
-(function() {
-  var savedRec = localStorage.getItem('copiloto_recepcionista');
-  if (savedRec) {
-    var sel = document.getElementById('copiloto-select-recep');
-    if (sel) sel.value = savedRec;
-  }
-
-  function getRecepActual() {
-    var sel = document.getElementById('copiloto-select-recep');
-    return sel ? sel.value : 'Eleisa';
-  }
-
-  function agregarBurbujaCopiloto(esUsuario, htmlContent, titulo, propId, textoBoton) {
-    var body = document.getElementById('copiloto-chat-body');
-    if (!body) return;
-    var div = document.createElement('div');
-    div.className = esUsuario ? 'copiloto-msg-user' : 'copiloto-msg-bot';
-    if (esUsuario) {
-      div.textContent = htmlContent;
-    } else {
-      var inner = '';
-      if (titulo) {
-        inner += '<div style="font-weight:800;color:#0f172a;margin-bottom:6px;font-size:13.5px;">' + titulo + '</div>';
-      }
-      inner += (htmlContent || '');
-      if (propId) {
-        var btnId = 'btn-conf-' + propId;
-        inner += '<button id="' + btnId + '" class="copiloto-btn-confirm" onclick="window.confirmarPropuestaCopiloto(\'' + propId + '\', \'' + btnId + '\')">' +
-                 (textoBoton || '✅ Confirmar que el asistente lo haga') + '</button>';
-      }
-      div.innerHTML = inner;
-    }
-    body.appendChild(div);
-    body.scrollTop = body.scrollHeight;
-  }
-
-  async function rpcCopiloto(method, payload) {
-    var r = await fetch('/api/rpc/' + method, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ args: [payload] })
-    });
-    var data = await r.json();
-    if (!r.ok) {
-      throw new Error(data.detail || data.error || 'Error en RPC ' + method);
-    }
-    return data.result;
-  }
-
-  window.toggleCopilotoOvalo = function() {
-    var d = document.getElementById('copiloto-drawer');
-    if (!d) return;
-    d.style.display = (d.style.display === 'flex') ? 'none' : 'flex';
-  };
-
-  window.plantillaMovimientoCopiloto = function() {
-    var inp = document.getElementById('copiloto-input');
-    if (!inp) return;
-    agregarBurbujaCopiloto(false,
-      "<div style='font-size:12.5px;color:#334155;'>" +
-      "Escribe abajo qué movimiento deseas que haga por ti (te pediré confirmación antes de aplicarlo):<br>" +
-      "• <code>Cambia la 302 a la 201 de la fecha 13</code><br>" +
-      "• <code>Pasa la 301 de la fecha 13 a la fecha 14</code><br>" +
-      "• <code>Anótale 1 Agua sin gas a la 204 en efectivo</code>" +
-      "</div>",
-      "⚡ Ejecutor Directo Auditado"
-    );
-    inp.focus();
-  };
-
-  window.accionRapidaCopiloto = async function(accion) {
-    var rec = getRecepActual();
-    try {
-      var res = await rpcCopiloto('consultarAsistenteRecepcion', {
-        accionRapida: accion,
-        recepcionista: rec,
-        pregunta: ''
-      });
-      agregarBurbujaCopiloto(false, res.respuesta_html, res.titulo, res.propuesta_id, res.texto_boton_confirmar);
-    } catch (e) {
-      agregarBurbujaCopiloto(false, '<div style="color:#dc2626;">Error: ' + e.message + '</div>', '⚠️ Error');
-    }
-  };
-
-  window.enviarPreguntaCopiloto = async function() {
-    var inp = document.getElementById('copiloto-input');
-    if (!inp) return;
-    var txt = (inp.value || '').trim();
-    if (!txt) return;
-    inp.value = '';
-    var rec = getRecepActual();
-    agregarBurbujaCopiloto(true, txt);
-    try {
-      var res = await rpcCopiloto('consultarAsistenteRecepcion', {
-        pregunta: txt,
-        recepcionista: rec
-      });
-      agregarBurbujaCopiloto(false, res.respuesta_html, res.titulo, res.propuesta_id, res.texto_boton_confirmar);
-    } catch (e) {
-      agregarBurbujaCopiloto(false, '<div style="color:#dc2626;">Error: ' + e.message + '</div>', '⚠️ Error');
-    }
-  };
-
-  window.confirmarPropuestaCopiloto = async function(propId, btnId) {
-    var btn = document.getElementById(btnId);
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = '⏳ Ejecutando movimiento...';
-    }
-    var rec = getRecepActual();
-    try {
-      var res = await rpcCopiloto('confirmarMovimientoAsistente', {
-        propuestaId: propId,
-        recepcionista: rec
-      });
-      if (!res.ok) {
-        agregarBurbujaCopiloto(false, '<div style="color:#dc2626;">' + (res.error || 'No se pudo confirmar') + '</div>', '⚠️ Aviso');
-        return;
-      }
-      if (btn) {
-        btn.textContent = '✅ Movimiento Confirmado y Ejecutado';
-        btn.style.background = '#64748b';
-      }
-      agregarBurbujaCopiloto(false, res.respuesta_html, res.titulo);
-      if (typeof window.cargarDatos === 'function') {
-        window.cargarDatos();
-      }
-    } catch (e) {
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = '🔄 Reintentar Confirmación';
-      }
-      agregarBurbujaCopiloto(false, '<div style="color:#dc2626;">Error: ' + e.message + '</div>', '⚠️ Error');
-    }
-  };
-
-  window.abrirExtractoDuenoCopiloto = function() {
-    var m = document.getElementById('copiloto-modal-dueno');
-    if (m) m.style.display = 'flex';
-    window.cargarExtractoDuenoCopiloto();
-  };
-
-  window.cargarExtractoDuenoCopiloto = async function() {
-    var fRec = (document.getElementById('copiloto-dueno-filtro-rec') || {}).value || '';
-    var fTipo = (document.getElementById('copiloto-dueno-filtro-tipo') || {}).value || '';
-    var cont = document.getElementById('copiloto-dueno-tabla');
-    var kpis = document.getElementById('copiloto-dueno-kpis');
-    if (cont) cont.innerHTML = 'Cargando bitácora...';
-    try {
-      var res = await rpcCopiloto('obtenerExtractoDuenoAsistente', {
-        recepcionista: fRec,
-        tipo: fTipo,
-        limite: 100
-      });
-      var rsm = res.resumen || {};
-      if (kpis) {
-        kpis.innerHTML =
-          '<span style="color:#15803d;">⚡ Movimientos Ejecutados: ' + (rsm.movimientos_ejecutados || 0) + '</span>' +
-          '<span style="color:#dc2626;">🛡️ Bloqueos GR-09: ' + (rsm.intentos_bloqueados_gr09 || 0) + '</span>' +
-          '<span style="color:#0284c7;">🔍 Consultas: ' + (rsm.consultas_operativas || 0) + '</span>';
-      }
-      var items = res.items || [];
-      if (!items.length) {
-        cont.innerHTML = '<div style="color:#64748b;padding:16px;text-align:center;">No hay registros para este filtro.</div>';
-        return;
-      }
-      var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
-        '<tr style="background:#e2e8f0;text-align:left;">' +
-        '<th style="padding:6px;">Fecha / Hora</th><th>Recepcionista</th><th>Tipo</th><th>Hab</th><th>Pedido Original</th><th>Resumen para el Dueño</th></tr>';
-      items.forEach(function(it) {
-        var badgeBg = it.tipo_interaccion === 'INTENTO_BLOQUEADO_GR09' ? '#fee2e2' :
-                      (it.tipo_interaccion === 'MOVIMIENTO_EJECUTADO' ? '#dcfce7' : '#e0f2fe');
-        var badgeCol = it.tipo_interaccion === 'INTENTO_BLOQUEADO_GR09' ? '#991b1b' :
-                       (it.tipo_interaccion === 'MOVIMIENTO_EJECUTADO' ? '#166534' : '#075985');
-        html += '<tr style="border-bottom:1px solid #e2e8f0;">' +
-          '<td style="padding:6px;white-space:nowrap;">' + (it.fecha_dmy || '') + ' ' + (it.hora || '') + '</td>' +
-          '<td style="padding:6px;font-weight:700;">' + (it.recepcionista || '') + '</td>' +
-          '<td style="padding:6px;"><span style="background:' + badgeBg + ';color:' + badgeCol + ';padding:2px 6px;border-radius:4px;font-weight:700;font-size:11px;">' + (it.tipo_interaccion || '') + '</span></td>' +
-          '<td style="padding:6px;font-weight:700;">' + (it.hab || '-') + '</td>' +
-          '<td style="padding:6px;color:#334155;">' + (it.pedido_original || '') + '</td>' +
-          '<td style="padding:6px;font-weight:600;color:#0f172a;">' + (it.resumen_dueno || '') + '</td>' +
-          '</tr>';
-      });
-      html += '</table>';
-      cont.innerHTML = html;
-    } catch (e) {
-      if (cont) cont.innerHTML = '<div style="color:#dc2626;">Error cargando extracto: ' + e.message + '</div>';
-    }
-  };
-})();
-</script>
-
 <!-- =====================================================================================
-     MODAL BANDEJA WSP EN VIVO (WhatsApp de Recepción): pestañas por categoría + cruce + 1 clic
+     MODAL RESUMEN EJECUTIVO WSP (100 % SOLO LECTURA — Agente Analista IA por horarios)
      ===================================================================================== -->
 <div id="modalWspBandeja" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs hidden items-center justify-center z-50 p-3"
      onclick="if(event.target===this) cerrarModalWspBandeja()">
-  <div class="bg-white rounded-xl shadow-2xl w-[92vw] max-w-[1600px] h-[90vh] border border-slate-300 overflow-hidden flex flex-col relative">
-    <!-- Cabecera -->
-    <div class="px-4 py-2.5 bg-slate-900 text-white flex flex-wrap items-center gap-x-3 gap-y-1.5">
+  <div class="bg-white rounded-xl shadow-2xl w-[92vw] max-w-[1540px] h-[90vh] border border-slate-300 overflow-hidden flex flex-col relative">
+    <!-- Cabecera oscura limpia -->
+    <div class="px-4 py-2.5 bg-slate-900 text-white flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
       <div class="flex items-center gap-2 min-w-0">
-        <span class="text-lg">💬</span>
+        <span class="text-lg shrink-0">📊</span>
         <div class="min-w-0">
-          <h3 class="font-extrabold text-[13.5px] leading-tight">WhatsApp de Recepción — Bandeja en vivo</h3>
-          <p class="text-[10px] text-slate-300">Clasificado y cruzado con la base del hotel · se actualiza solo</p>
+          <h3 class="font-extrabold text-[13px] leading-tight">Resumen Inteligente de WhatsApp (Solo Recepción)</h3>
+          <p class="text-[10px] text-slate-300">100 % lectura · sin envío de mensajes · cruce con estancias y SUNAT</p>
         </div>
       </div>
-      <span id="wspModalEstado" class="text-[10.5px] font-black px-2 py-0.5 rounded bg-slate-700 text-slate-200">…</span>
-      <span id="wspModalModoPrueba" class="hidden text-[10.5px] font-black px-2 py-0.5 rounded bg-fuchsia-200 text-fuchsia-950 border border-fuchsia-400">🧪 MODO PRUEBA: envíos simulados</span>
-      <button type="button" id="wspBtnSimular" onclick="wspToggleSimulador()"
-              class="hidden text-[11px] font-black px-2 py-1 rounded bg-fuchsia-600 hover:bg-fuchsia-700 text-white cursor-pointer">➕ Simular mensaje</button>
-      <div class="ml-auto flex items-center gap-3">
-        <button type="button" id="wspBtnAutoAdelanto" onclick="wspToggleAutoAdelanto()"
-                class="flex items-center gap-2 text-[11px] font-bold text-slate-100 cursor-pointer"
-                title="Si está activo, el sistema envía la pregunta de reserva (tipo y hora) a los chats de RESERVA con 3 min sin respuesta (una sola vez por ráfaga)">
-          <span id="wspSwitchAuto" class="wsp-switch"></span>
-          <span>Auto-adelantar reservas tras 3 min</span>
-        </button>
-        <button type="button" onclick="wspCargarBandeja(true)" title="Actualizar ahora"
-                class="text-[11px] font-black px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white cursor-pointer">🔄</button>
+      <span id="wspModalEstado" class="text-[10.5px] font-black px-2 py-0.5 rounded bg-slate-700 text-slate-200 shrink-0">…</span>
+      <span id="wspModalHorario" class="text-[10.5px] font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-200 border border-slate-700">Último corte: — · Próximo: — (08:00 · 13:00 · 19:00 · 23:00)</span>
+      <span id="wspModalFuenteIa" class="hidden text-[10px] font-bold px-2 py-0.5 rounded bg-slate-800 text-amber-200 border border-slate-600 shrink-0"></span>
+      <div class="ml-auto flex items-center gap-2 shrink-0">
+        <button type="button" id="wspBtnActualizarAhora" onclick="wspActualizarAhora()"
+                class="text-[11px] font-black px-2.5 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-xs cursor-pointer transition-colors">🔄 Actualizar resumen ahora</button>
         <button type="button" onclick="cerrarModalWspBandeja()" class="text-slate-400 hover:text-white text-lg font-bold p-1 cursor-pointer" title="Cerrar (Esc)">✕</button>
       </div>
     </div>
 
-    <!-- Simulador (solo modo prueba) -->
-    <div id="wspSimulador" class="hidden px-4 py-2 bg-fuchsia-50 border-b border-fuchsia-200 flex flex-wrap items-end gap-2 text-[11px]">
-      <label class="flex flex-col font-bold text-fuchsia-900">Celular / jid
-        <input id="wspSimJid" type="text" value="SIM-999999999" class="mt-0.5 px-2 py-1 rounded border border-fuchsia-300 bg-white w-36 font-mono">
-      </label>
-      <label class="flex flex-col font-bold text-fuchsia-900">Nombre
-        <input id="wspSimNombre" type="text" value="Cliente Prueba" class="mt-0.5 px-2 py-1 rounded border border-fuchsia-300 bg-white w-36">
-      </label>
-      <label class="flex flex-col font-bold text-fuchsia-900 flex-1 min-w-[260px]">Texto del mensaje
-        <input id="wspSimTexto" type="text" placeholder="hola tienen habitación matrimonial para hoy?"
-               onkeydown="if(event.key==='Enter'){event.preventDefault();wspEnviarSimulado();}"
-               class="mt-0.5 px-2 py-1 rounded border border-fuchsia-300 bg-white w-full">
-      </label>
-      <button type="button" onclick="wspEnviarSimulado()" class="px-3 py-1.5 rounded bg-fuchsia-700 hover:bg-fuchsia-800 text-white font-black cursor-pointer">Simular</button>
-      <div class="w-full flex flex-wrap gap-1.5 pt-0.5">
-        <span class="text-fuchsia-800 font-bold">Ejemplos:</span>
-        <button type="button" data-wsp-ej="hola tienen habitación matrimonial para hoy?" class="wsp-ej px-1.5 py-0.5 rounded bg-white border border-fuchsia-300 hover:bg-fuchsia-100 cursor-pointer">🛏️ Reserva</button>
-        <button type="button" data-wsp-ej="necesito mi factura de la 105, RUC 20123456789" class="wsp-ej px-1.5 py-0.5 rounded bg-white border border-fuchsia-300 hover:bg-fuchsia-100 cursor-pointer">🧾 Comprobante</button>
-        <button type="button" data-wsp-ej="soy 304, me pueden subir toallas porfa" class="wsp-ej px-1.5 py-0.5 rounded bg-white border border-fuchsia-300 hover:bg-fuchsia-100 cursor-pointer">🔔 Habitación</button>
-        <button type="button" data-wsp-ej="ya te yapeé S/ 75 de la habitación" class="wsp-ej px-1.5 py-0.5 rounded bg-white border border-fuchsia-300 hover:bg-fuchsia-100 cursor-pointer">💳 Voucher</button>
-      </div>
+    <!-- Franja superior suave con síntesis general del turno -->
+    <div id="wspResumenTurnoBar" class="px-4 py-2 bg-amber-50/70 border-b border-[#DFD2C5] flex flex-wrap items-center gap-2 text-xs">
+      <span class="font-extrabold text-amber-900 shrink-0">🧭 Síntesis del turno:</span>
+      <span id="wspResumenGeneralTexto" class="font-semibold text-slate-800 flex-1 min-w-[220px]">Cargando el último corte ejecutivo…</span>
+      <div id="wspResumenContadores" class="flex flex-wrap items-center gap-1.5 text-[11px] font-black"></div>
     </div>
 
-    <!-- Pestañas -->
-    <div id="wspTabs" class="px-3 pt-2 pb-1.5 bg-slate-50 border-b border-slate-200 flex flex-wrap gap-1.5 text-[11.5px] font-black">
-      <button type="button" data-wsp-tab="PENDIENTES" class="wsp-tab px-2.5 py-1 rounded-md border border-slate-300 bg-white text-slate-800 hover:bg-amber-50 cursor-pointer">⏳ Pendientes (<span data-wsp-cnt="PENDIENTES">0</span>)</button>
-      <button type="button" data-wsp-tab="COMPROBANTE" class="wsp-tab px-2.5 py-1 rounded-md border border-slate-300 bg-white text-slate-800 hover:bg-amber-50 cursor-pointer">🧾 Comprobantes <span data-wsp-cnt="COMPROBANTE" class="text-slate-400"></span></button>
-      <button type="button" data-wsp-tab="RESERVA" class="wsp-tab px-2.5 py-1 rounded-md border border-slate-300 bg-white text-slate-800 hover:bg-amber-50 cursor-pointer">🛏️ Reservas <span data-wsp-cnt="RESERVA" class="text-slate-400"></span></button>
-      <button type="button" data-wsp-tab="HABITACION" class="wsp-tab px-2.5 py-1 rounded-md border border-slate-300 bg-white text-slate-800 hover:bg-amber-50 cursor-pointer">🔔 Habitación <span data-wsp-cnt="HABITACION" class="text-slate-400"></span></button>
-      <button type="button" data-wsp-tab="VOUCHER" class="wsp-tab px-2.5 py-1 rounded-md border border-slate-300 bg-white text-slate-800 hover:bg-amber-50 cursor-pointer">💳 Vouchers <span data-wsp-cnt="VOUCHER" class="text-slate-400"></span></button>
-      <button type="button" data-wsp-tab="INTERNO" class="wsp-tab px-2.5 py-1 rounded-md border border-slate-300 bg-white text-slate-800 hover:bg-amber-50 cursor-pointer">🏠 Interno <span data-wsp-cnt="INTERNO" class="text-slate-400"></span></button>
-      <span id="wspBandejaInfo" class="ml-auto self-center text-[10.5px] font-semibold text-slate-500"></span>
+    <!-- Aviso de análisis IA en curso -->
+    <div id="wspAnalizandoBanner" class="hidden px-4 py-2 bg-sky-50 border-b border-sky-200 text-sky-900 text-xs font-extrabold items-center gap-2">
+      <span>⏳</span>
+      <span>Analizando conversaciones con IA… esto puede tardar unos segundos.</span>
     </div>
 
-    <!-- Lista de tarjetas -->
-    <div id="wspBandejaLista" class="flex-1 min-h-0 overflow-y-auto p-3 space-y-3 bg-[#FAF6F3] text-xs"></div>
-
-    <!-- Confirmación de envío (texto final editable) -->
-    <div id="wspConfirm" class="hidden absolute inset-0 bg-slate-900/50 items-center justify-center p-4" style="z-index: 60;">
-      <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl border border-slate-300 overflow-hidden">
-        <div class="px-4 py-2.5 bg-emerald-800 text-white flex items-center justify-between">
-          <div class="font-extrabold text-[13px]">📤 Confirmar respuesta a <span id="wspConfirmDest"></span></div>
-          <button type="button" onclick="wspCerrarConfirm()" class="text-emerald-200 hover:text-white text-lg font-bold p-1 cursor-pointer">✕</button>
-        </div>
-        <div class="p-4 space-y-2 text-xs">
-          <div id="wspConfirmPlantilla" class="text-[10.5px] font-bold text-slate-500"></div>
-          <textarea id="wspConfirmTexto" rows="6" class="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-[12.5px] focus:outline-hidden focus:ring-2 focus:ring-emerald-600" placeholder="Escribe la respuesta…"></textarea>
-          <div id="wspConfirmAviso" class="hidden text-[10.5px] font-black text-fuchsia-800 bg-fuchsia-50 border border-fuchsia-200 rounded px-2 py-1">🧪 Modo prueba: el mensaje NO saldrá por WhatsApp (envío simulado).</div>
-          <div class="flex justify-end gap-2 pt-1">
-            <button type="button" onclick="wspCerrarConfirm()" class="px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-800 font-black cursor-pointer">Cancelar</button>
-            <button type="button" id="wspConfirmBtn" onclick="wspConfirmarEnvio()" class="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-black cursor-pointer">📤 Enviar</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <!-- Vista única ejecutiva con los 3 bloques -->
+    <div id="wspBandejaLista" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-5 bg-[#FAF6F3] text-xs"></div>
   </div>
 </div>
 <div id="wspToast" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 px-3.5 py-2 rounded-lg text-xs font-black shadow-lg" style="z-index: 70;"></div>
 
 <script>
 /* ==========================================================================================
-   VISOR WSP EN VIVO + BANDEJA (prefijo wsp). Consume las RPC de wsp_inteligencia.py:
-   obtenerAlertasWsp · obtenerBandejaWsp · enviarRespuestaWsp · marcarChatWspAtendido ·
-   configurarAutoAdelantoWsp · simularMensajeWsp. Todo texto externo se escapa (XSS).
+   RESUMEN EJECUTIVO WSP 100 % SOLO LECTURA (prefijo wsp).
+   Consume únicamente: obtenerAlertasWsp · obtenerBandejaWsp · actualizarResumenWspAhora.
+   Cero envío de mensajes, cero plantillas, cero simulador. Todo texto externo se escapa (XSS).
    ========================================================================================== */
 (function () {
   'use strict';
 
-  var WSP_POLL_MS = 5000;
-  var WSP_ROTAR_MS = 4000;
-  var WSP_REFRESCO_MODAL_MS = 15000;
+  var WSP_POLL_MS = 10000;
+  var WSP_REFRESCO_MODAL_MS = 30000;
 
   var WSP = {
-    alerta: null,          // último obtenerAlertasWsp válido
+    alerta: null,
     errorAlerta: false,
-    idxRot: 0,
     pollEnCurso: false,
     pollInicio: 0,
-    pestana: 'PENDIENTES',
-    datos: null,           // último obtenerBandejaWsp normalizado
+    datos: null,
     bandejaEnCurso: false,
+    actualizando: false,
     ultimoRefrescoModal: 0,
-    ultimosPendientes: -1,
-    modoPrueba: false,
-    autoAdelanto: false,
-    confirm: null          // {jid, nombre, plantilla}
+    ultimoCorteVisto: ''
   };
 
-  var WSP_CAT = {
-    COMPROBANTE: { ico: '🧾', lbl: 'Comprobante', chip: 'bg-sky-100 text-sky-900 border-sky-300' },
-    RESERVA:     { ico: '🛏️', lbl: 'Reserva',     chip: 'bg-violet-100 text-violet-900 border-violet-300' },
-    HABITACION:  { ico: '🔔', lbl: 'Habitación',  chip: 'bg-amber-100 text-amber-900 border-amber-300' },
-    VOUCHER:     { ico: '💳', lbl: 'Voucher',     chip: 'bg-emerald-100 text-emerald-900 border-emerald-300' },
-    INTERNO:     { ico: '🏠', lbl: 'Interno',     chip: 'bg-slate-100 text-slate-700 border-slate-300' }
+  var WSP_TIPO_CHIP = {
+    COMPROBANTE: { ico: '🧾', lbl: 'Comprobante', cls: 'bg-sky-100 text-sky-900 border-sky-300' },
+    RESERVA:     { ico: '🛏️', lbl: 'Reserva',     cls: 'bg-violet-100 text-violet-900 border-violet-300' },
+    HABITACION:  { ico: '🔔', lbl: 'Habitación',  cls: 'bg-amber-100 text-amber-900 border-amber-300' },
+    PAGO:        { ico: '💳', lbl: 'Pago / Voucher', cls: 'bg-emerald-100 text-emerald-900 border-emerald-300' },
+    VOUCHER:     { ico: '💳', lbl: 'Voucher',     cls: 'bg-emerald-100 text-emerald-900 border-emerald-300' }
   };
 
-  var WSP_PLANTILLAS_DEF = {
-    ADELANTO_RESERVA: '¡Hola! 😊 Gracias por escribir al Hotel El Óvalo Mariátegui. ¿Qué tipo de habitación busca (Simple, Matrimonial, Doble) y para qué fecha y hora aproximada de llegada?',
-    COMPROBANTE_DATOS: 'Con gusto. ¿Nos confirma su RUC (factura) o DNI (boleta) y el número de habitación?',
-    COMPROBANTE_EN_PROCESO: 'Recibido, en unos minutos le enviamos su comprobante.',
-    HAB_RECIBIDO: 'Recibido 👍 enseguida le atendemos.'
+  var WSP_NOTA_CHIP = {
+    RECLAMO:        { ico: '🚨', lbl: 'Reclamo',        cls: 'bg-rose-100 text-rose-900 border-rose-300', borde: 'border-rose-300 bg-rose-50/40' },
+    RECOMENDACION:  { ico: '💡', lbl: 'Recomendación',  cls: 'bg-amber-100 text-amber-900 border-amber-300', borde: 'border-amber-300 bg-amber-50/40' },
+    ACUERDO:        { ico: '🤝', lbl: 'Acuerdo',        cls: 'bg-sky-100 text-sky-900 border-sky-300', borde: 'border-sky-300 bg-sky-50/40' }
   };
 
   // ---------------------------------------------------------------- utilidades
@@ -12164,32 +11705,49 @@
     });
   }
   function wspNum(v) { var n = Number(v); return isFinite(n) ? n : 0; }
-  function wspSoles(v) { return (v === null || v === undefined || v === '') ? '-' : 'S/ ' + wspNum(v).toFixed(2); }
-  function wspCat(c) { return WSP_CAT[String(c || '').toUpperCase()] || { ico: '💬', lbl: String(c || 'Mensaje'), chip: 'bg-slate-100 text-slate-700 border-slate-300' }; }
-  function wspUsuario() {
-    try { return localStorage.getItem('copiloto_recepcionista') || 'Recepción'; } catch (e) { return 'Recepción'; }
+  function wspMontoTexto(v) {
+    if (v === null || v === undefined || v === '') return '—';
+    if (typeof v === 'string' && v.trim().indexOf('S/') === 0) return v.trim();
+    var n = Number(v);
+    return isFinite(n) ? ('S/ ' + n.toFixed(2)) : String(v);
   }
   function wspEl(id) { return document.getElementById(id); }
+
+  function wspTipoMeta(t) {
+    var k = String(t || '').toUpperCase().trim();
+    return WSP_TIPO_CHIP[k] || { ico: '💬', lbl: t ? String(t) : 'Consulta', cls: 'bg-slate-100 text-slate-800 border-slate-300' };
+  }
+
+  function wspNotaMeta(t) {
+    var k = String(t || '').toUpperCase().trim();
+    if (k.indexOf('RECLAM') >= 0 || k.indexOf('QUEJ') >= 0) return WSP_NOTA_CHIP.RECLAMO;
+    if (k.indexOf('ACUERD') >= 0 || k.indexOf('ENCARG') >= 0) return WSP_NOTA_CHIP.ACUERDO;
+    if (k.indexOf('RECOM') >= 0 || k.indexOf('SUGER') >= 0) return WSP_NOTA_CHIP.RECOMENDACION;
+    return { ico: '📌', lbl: t ? String(t) : 'Nota', cls: 'bg-slate-100 text-slate-800 border-slate-300', borde: 'border-slate-200 bg-white' };
+  }
 
   function wspRpc(method, args, ok, fail) {
     if (typeof window.callContabilidadRpc === 'function') {
       return window.callContabilidadRpc(method, args, ok, fail);
     }
-    fetch('/api/rpc/' + method, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ args: args || [] }) })
+    fetch('/api/rpc/' + method, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ args: args || [] })
+    })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (d && d.rpcError) throw new Error(d.error || 'RPC Error');
+        if (d && d.rpcError) throw new Error(d.error || d.detail || 'RPC Error');
         if (ok) ok((d && d.result !== undefined) ? d.result : d);
       })
       .catch(function (e) { if (fail) fail(e); });
   }
 
   function wspRespuestaFallida(res) {
-    // La RPC respondió pero con error lógico ({ok:false,...} / {error:...} / {detail:...})
     if (!res || typeof res !== 'object') return 'Respuesta vacía';
     if (res.ok === false) return res.error || res.mensaje || res.msg || 'Operación rechazada';
-    if (res.detail && !res.nivel && !res.tarjetas) return String(res.detail);
-    if (res.error && !res.nivel && !res.tarjetas && res.ok !== true) return String(res.error);
+    if (res.detail && !res.nivel && !res.pendientes_responder) return String(res.detail);
+    if (res.error && !res.nivel && !res.pendientes_responder && res.ok !== true) return String(res.error);
     return '';
   }
 
@@ -12199,7 +11757,7 @@
     if (!t) return;
     t.className = 'fixed bottom-4 left-1/2 -translate-x-1/2 px-3.5 py-2 rounded-lg text-xs font-black shadow-lg border ' +
       (tipo === 'error' ? 'bg-rose-50 text-rose-900 border-rose-300' :
-       tipo === 'sim' ? 'bg-fuchsia-50 text-fuchsia-900 border-fuchsia-300' :
+       tipo === 'info' ? 'bg-sky-50 text-sky-900 border-sky-300' :
        'bg-emerald-50 text-emerald-900 border-emerald-300');
     t.textContent = msg;
     t.classList.remove('hidden');
@@ -12207,7 +11765,7 @@
     wspToastTimer = setTimeout(function () { t.classList.add('hidden'); }, 4500);
   }
 
-  // ---------------------------------------------------------------- visor (ticker)
+  // ---------------------------------------------------------------- barra superior (#wspTicker)
   function wspNivelTicker(nivel) {
     var btn = wspEl('wspTicker');
     if (!btn) return;
@@ -12225,78 +11783,61 @@
       wspNivelTicker('ERROR');
       ico.textContent = '💬';
       badge.classList.add('hidden');
-      txt.textContent = 'WhatsApp: sin datos del visor';
+      txt.textContent = 'WSP: resumen no disponible';
       esp.textContent = '';
-      btn.title = 'No se pudo consultar el visor de WhatsApp (se reintenta cada 5 s). Clic para abrir la bandeja.';
+      btn.title = 'No se pudo consultar el resumen de WhatsApp (se reintenta cada 10 s). Clic para abrir el visor.';
       return;
     }
 
     var nivel = String(a.nivel || 'OK').toUpperCase();
-    var pend = wspNum(a.pendientes);
-    var top = Array.isArray(a.top) ? a.top : [];
-
-    if (pend > 0) { badge.textContent = String(pend); badge.classList.remove('hidden'); }
-    else badge.classList.add('hidden');
-
-    if (nivel === 'SIN_CONEXION') {
-      wspNivelTicker('SIN_CONEXION');
-      ico.textContent = '📵';
-      var ed = String(a.estado_daemon || '').toUpperCase();
-      var angosto = btn.offsetWidth && btn.offsetWidth < 400;
-      txt.textContent = (!angosto && (ed.indexOf('QR') >= 0 || ed.indexOf('LOGGED_OUT') >= 0)) ? 'WhatsApp desconectado / pide QR — escanee en el celular de Recepción' : 'WhatsApp desconectado / pide QR';
-      esp.textContent = (!angosto && a.estado_daemon) ? String(a.estado_daemon) : '';
-      btn.title = 'El WhatsApp de Recepción no está conectado (' + (a.estado_daemon || 'sin estado') + '). Escanee el QR en el celular de Recepción.';
-      return;
+    if (['OK', 'AMBAR', 'ROJO', 'SIN_CONEXION'].indexOf(nivel) < 0) {
+      nivel = wspNum(a.pendientes !== undefined ? a.pendientes : a.pendientes_count) > 0 ? 'AMBAR' : 'OK';
     }
+    var pend = wspNum(a.pendientes !== undefined ? a.pendientes : a.pendientes_count);
+    var atend = wspNum(a.atendidos !== undefined ? a.atendidos : a.atendidos_count);
+    var recom = wspNum(a.recomendaciones !== undefined ? a.recomendaciones : a.recomendaciones_count);
+    var corte = a.ultimo_corte_hora ? String(a.ultimo_corte_hora) : '';
 
-    if (nivel === 'OK' || pend <= 0 || !top.length) {
-      wspNivelTicker('OK');
-      ico.textContent = '💬';
-      badge.classList.add('hidden');
-      txt.textContent = 'WhatsApp al día ✅';
-      esp.textContent = '';
-      btn.title = 'Sin mensajes pendientes en el WhatsApp de Recepción. Clic para ver la bandeja.';
-      return;
-    }
+    wspNivelTicker(nivel);
+    ico.textContent = (nivel === 'SIN_CONEXION') ? '📵' : '💬';
 
-    wspNivelTicker(nivel === 'ROJO' ? 'ROJO' : 'AMBAR');
-    var it = top[WSP.idxRot % top.length] || top[0];
-    var c = wspCat(it.categoria);
-    var partes = [];
-    var resumen = it.resumen ? '“' + String(it.resumen).replace(/\s+/g, ' ').slice(0, 70) + '”' : '';
-    if (btn.offsetWidth && btn.offsetWidth < 400) {
-      // Visor angosto (p. ej. 1366 px): el icono ya indica la categoría; prioriza nombre y Hab
-      if (it.nombre) partes.push(String(it.nombre).slice(0, 22));
-      if (it.hab) partes.push('Hab ' + it.hab);
-      if (resumen) partes.push(resumen);
+    if (pend > 0) {
+      badge.textContent = String(pend);
+      badge.className = 'shrink-0 px-1.5 rounded font-black ' +
+        (nivel === 'ROJO' ? 'bg-white text-red-700' : 'bg-amber-600 text-white');
     } else {
-      partes.push(c.lbl);
-      if (resumen) partes.push(resumen);
-      if (it.nombre) partes.push(String(it.nombre).slice(0, 26));
-      if (it.hab) partes.push('Hab ' + it.hab);
+      badge.classList.add('hidden');
     }
-    ico.textContent = c.ico;
-    txt.textContent = partes.join(' · ');
-    var m = wspNum(it.espera_min);
-    var itRojo = String(it.nivel || nivel).toUpperCase() === 'ROJO' || m >= 5;
-    esp.textContent = itRojo ? ('⏰ ' + m + ' min' + ((btn.offsetWidth && btn.offsetWidth < 400) ? '' : ' sin responder')) : 'hace ' + m + ' min';
-    btn.title = top.map(function (x) {
-      return wspCat(x.categoria).ico + ' ' + (x.nombre || x.jid || '') + (x.hab ? ' · Hab ' + x.hab : '') + ' · ' + wspNum(x.espera_min) + ' min — ' + (x.resumen || '');
-    }).join('\n') + '\n\nClic para ver todos y responder';
-  }
 
-  function wspRotar() {
-    var a = WSP.alerta;
-    if (!a || !Array.isArray(a.top) || a.top.length < 2) return;
-    var nivel = String(a.nivel || '').toUpperCase();
-    if (nivel !== 'AMBAR' && nivel !== 'ROJO') return;
-    var txt = wspEl('wspTickerTexto');
-    if (txt) txt.classList.add('wsp-fade');
-    setTimeout(function () {
-      WSP.idxRot = (WSP.idxRot + 1) % a.top.length;
-      wspPintarTicker();
-      if (txt) txt.classList.remove('wsp-fade');
-    }, 250);
+    var titular = a.titular_barra ? String(a.titular_barra).trim() : '';
+    if (!titular) {
+      if (nivel === 'SIN_CONEXION') {
+        titular = 'WhatsApp desconectado / revisar conexión';
+      } else if (pend > 0) {
+        titular = 'WSP: ' + pend + ' por responder · ' + atend + ' atendidos' + (corte ? ' (Corte ' + corte + ')' : '');
+      } else {
+        titular = 'WSP al día · ' + atend + ' chats resumidos' + (corte ? ' (' + corte + ')' : '');
+      }
+    }
+    txt.textContent = titular;
+
+    var angosto = btn.offsetWidth && btn.offsetWidth < 360;
+    if (!angosto && corte && titular.indexOf(corte) < 0 && nivel !== 'SIN_CONEXION') {
+      esp.textContent = 'Corte ' + corte;
+    } else {
+      esp.textContent = '';
+    }
+
+    var lineasTitle = [titular];
+    if (a.resumen_general) lineasTitle.push('Síntesis: ' + a.resumen_general);
+    lineasTitle.push('Pendientes: ' + pend + ' · Notas/Acuerdos: ' + recom + ' · Atendidos: ' + atend);
+    if (corte || a.proximo_corte_hora) {
+      lineasTitle.push('Último corte: ' + (corte || '—') + (a.ultimo_corte_fecha ? ' (' + a.ultimo_corte_fecha + ')' : '') +
+        (a.proximo_corte_hora ? ' · Próximo: ' + a.proximo_corte_hora : ''));
+    }
+    if (a.estado_daemon) lineasTitle.push('Recepción WSP: ' + a.estado_daemon);
+    lineasTitle.push('Clic para abrir el Resumen Inteligente de WhatsApp');
+    btn.title = lineasTitle.join('\n');
   }
 
   function wspCargarAlertas(forzar) {
@@ -12306,19 +11847,24 @@
     WSP.pollInicio = Date.now();
     wspRpc('obtenerAlertasWsp', [], function (res) {
       WSP.pollEnCurso = false;
-      if (!res || typeof res !== 'object' || !('nivel' in res)) {
+      var err = wspRespuestaFallida(res);
+      if (!res || typeof res !== 'object' || err) {
         WSP.errorAlerta = true;
         wspPintarTicker();
         return;
       }
       WSP.errorAlerta = false;
       WSP.alerta = res;
-      if (typeof res.modo_prueba === 'boolean') WSP.modoPrueba = res.modo_prueba;
-      if (typeof res.auto_adelanto === 'boolean') WSP.autoAdelanto = res.auto_adelanto;
-      if (!Array.isArray(res.top) || WSP.idxRot >= res.top.length) WSP.idxRot = 0;
       wspPintarTicker();
       wspPintarCabeceraModal();
-      wspQuizasRefrescarModal(wspNum(res.pendientes));
+      var marcaCorte = String(res.ultimo_corte_fecha || '') + ' ' + String(res.ultimo_corte_hora || '') + '#' + String(res.pendientes || 0);
+      if (wspModalAbierto() && !WSP.actualizando) {
+        if ((WSP.ultimoCorteVisto && marcaCorte !== WSP.ultimoCorteVisto) ||
+            (Date.now() - WSP.ultimoRefrescoModal) > WSP_REFRESCO_MODAL_MS) {
+          wspCargarBandeja(false);
+        }
+      }
+      WSP.ultimoCorteVisto = marcaCorte;
     }, function () {
       WSP.pollEnCurso = false;
       WSP.errorAlerta = true;
@@ -12326,21 +11872,10 @@
     });
   }
 
-  // ---------------------------------------------------------------- modal
+  // ---------------------------------------------------------------- modal ejecutivo
   function wspModalAbierto() {
     var m = wspEl('modalWspBandeja');
     return !!(m && !m.classList.contains('hidden'));
-  }
-  function wspConfirmAbierto() {
-    var c = wspEl('wspConfirm');
-    return !!(c && !c.classList.contains('hidden'));
-  }
-
-  function wspQuizasRefrescarModal(pend) {
-    if (!wspModalAbierto() || wspConfirmAbierto()) { WSP.ultimosPendientes = pend; return; }
-    var cambio = (WSP.ultimosPendientes !== -1 && pend !== WSP.ultimosPendientes);
-    WSP.ultimosPendientes = pend;
-    if (cambio || (Date.now() - WSP.ultimoRefrescoModal) > WSP_REFRESCO_MODAL_MS) wspCargarBandeja(false);
   }
 
   window.abrirModalWspBandeja = function () {
@@ -12349,69 +11884,84 @@
     m.classList.remove('hidden');
     m.classList.add('flex');
     wspPintarCabeceraModal();
-    wspPintarTabs();
-    wspCargarBandeja(true);
+    if (WSP.datos) wspRenderModal();
+    wspCargarBandeja(!WSP.datos);
   };
 
   window.cerrarModalWspBandeja = function () {
     var m = wspEl('modalWspBandeja');
     if (!m) return;
-    wspCerrarConfirm();
     m.classList.add('hidden');
     m.classList.remove('flex');
   };
 
-  function wspPintarCabeceraModal() {
-    var est = wspEl('wspModalEstado');
-    if (est) {
-      var a = WSP.alerta;
-      var ed = a ? String(a.estado_daemon || '') : '';
-      var con = ed.toUpperCase() === 'CONECTADO';
-      est.textContent = WSP.errorAlerta ? '⚠️ Visor sin datos' : (con ? '🟢 Conectado' : ('📵 ' + (ed || 'Sin estado')));
-      est.className = 'text-[10.5px] font-black px-2 py-0.5 rounded ' +
-        (WSP.errorAlerta ? 'bg-slate-600 text-slate-100' : con ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white');
-    }
-    var mp = wspEl('wspModalModoPrueba'), bs = wspEl('wspBtnSimular');
-    if (mp) mp.classList.toggle('hidden', !WSP.modoPrueba);
-    if (bs) bs.classList.toggle('hidden', !WSP.modoPrueba);
-    if (!WSP.modoPrueba) { var sim = wspEl('wspSimulador'); if (sim) sim.classList.add('hidden'); }
-    var sw = wspEl('wspSwitchAuto');
-    if (sw) sw.classList.toggle('wsp-on', !!WSP.autoAdelanto);
-  }
-
-  function wspPintarTabs() {
-    var tabs = document.querySelectorAll('#wspTabs .wsp-tab');
-    for (var i = 0; i < tabs.length; i++) {
-      var on = tabs[i].getAttribute('data-wsp-tab') === WSP.pestana;
-      tabs[i].classList.toggle('wsp-tab-activa', on);
-      tabs[i].classList.toggle('bg-white', !on);
-      tabs[i].classList.toggle('text-slate-800', !on);
-    }
-    var cnt = (WSP.datos && WSP.datos.conteos) || {};
-    var spans = document.querySelectorAll('#wspTabs [data-wsp-cnt]');
-    for (var j = 0; j < spans.length; j++) {
-      var k = spans[j].getAttribute('data-wsp-cnt');
-      var v = cnt[k];
-      if (k === 'PENDIENTES') {
-        if (v === undefined && WSP.alerta) v = WSP.alerta.pendientes;
-        spans[j].textContent = String(wspNum(v));
-      } else {
-        spans[j].textContent = (v === undefined || v === null) ? '' : '(' + wspNum(v) + ')';
-      }
-    }
-  }
-
-  function wspNormalizarBandeja(res) {
-    if (Array.isArray(res)) return { tarjetas: res, conteos: {}, plantillas: {}, libres_hoy: [] };
+  function wspNormalizarDatos(res) {
     if (!res || typeof res !== 'object') return null;
     return {
-      tarjetas: Array.isArray(res.tarjetas) ? res.tarjetas : [],
-      conteos: res.conteos || {},
-      plantillas: res.plantillas || {},
-      libres_hoy: Array.isArray(res.libres_hoy) ? res.libres_hoy : [],
-      modo_prueba: res.modo_prueba,
-      auto_adelanto: res.auto_adelanto
+      estado_daemon: res.estado_daemon || (WSP.alerta && WSP.alerta.estado_daemon) || '',
+      ultimo_corte_hora: res.ultimo_corte_hora || (WSP.alerta && WSP.alerta.ultimo_corte_hora) || '',
+      ultimo_corte_fecha: res.ultimo_corte_fecha || (WSP.alerta && WSP.alerta.ultimo_corte_fecha) || '',
+      proximo_corte_hora: res.proximo_corte_hora || (WSP.alerta && WSP.alerta.proximo_corte_hora) || '',
+      fuente_ia: res.fuente_ia || '',
+      horarios_fijos: Array.isArray(res.horarios_fijos) && res.horarios_fijos.length ? res.horarios_fijos : ['08:00', '13:00', '19:00', '23:00'],
+      resumen_general_turno: res.resumen_general_turno || res.resumen_general || (WSP.alerta && WSP.alerta.resumen_general) || '',
+      pendientes_responder: Array.isArray(res.pendientes_responder) ? res.pendientes_responder : [],
+      recomendaciones_y_notas: Array.isArray(res.recomendaciones_y_notas) ? res.recomendaciones_y_notas : [],
+      atendidos_y_gracias: Array.isArray(res.atendidos_y_gracias) ? res.atendidos_y_gracias : []
     };
+  }
+
+  function wspPintarCabeceraModal() {
+    var d = WSP.datos || {};
+    var a = WSP.alerta || {};
+    var est = wspEl('wspModalEstado');
+    if (est) {
+      var ed = String(d.estado_daemon || a.estado_daemon || '').trim();
+      var con = ed.toUpperCase() === 'CONECTADO';
+      if (!ed && WSP.errorAlerta) {
+        est.textContent = '⚠️ Sin datos';
+        est.className = 'text-[10.5px] font-black px-2 py-0.5 rounded bg-slate-600 text-slate-100';
+      } else if (con) {
+        est.textContent = '🟢 Conectado';
+        est.className = 'text-[10.5px] font-black px-2 py-0.5 rounded bg-emerald-600 text-white';
+      } else {
+        est.textContent = '📵 Desconectado' + (ed ? ' (' + ed + ')' : '');
+        est.className = 'text-[10.5px] font-black px-2 py-0.5 rounded bg-rose-600 text-white';
+      }
+    }
+
+    var hor = wspEl('wspModalHorario');
+    if (hor) {
+      var ult = d.ultimo_corte_hora || a.ultimo_corte_hora || '—';
+      var fec = d.ultimo_corte_fecha || a.ultimo_corte_fecha || '';
+      var prox = d.proximo_corte_hora || a.proximo_corte_hora || '—';
+      var fijos = (d.horarios_fijos && d.horarios_fijos.length) ? d.horarios_fijos.join(' · ') : '08:00 · 13:00 · 19:00 · 23:00';
+      hor.textContent = 'Último corte: ' + ult + ' · Próximo: ' + prox + ' (' + fijos + ')';
+      hor.title = (fec ? 'Fecha del último corte: ' + fec + ' — ' : '') + 'Horarios automáticos: ' + fijos;
+    }
+
+    var fia = wspEl('wspModalFuenteIa');
+    if (fia) {
+      var fuente = String(d.fuente_ia || '').trim();
+      if (fuente) {
+        fia.textContent = '🤖 ' + fuente;
+        fia.classList.remove('hidden');
+      } else {
+        fia.classList.add('hidden');
+      }
+    }
+
+    var btnAct = wspEl('wspBtnActualizarAhora');
+    var ban = wspEl('wspAnalizandoBanner');
+    if (btnAct) {
+      btnAct.disabled = !!WSP.actualizando;
+      btnAct.textContent = WSP.actualizando ? '⏳ Analizando conversaciones con IA...' : '🔄 Actualizar resumen ahora';
+      btnAct.classList.toggle('opacity-75', !!WSP.actualizando);
+    }
+    if (ban) {
+      ban.classList.toggle('hidden', !WSP.actualizando);
+      ban.classList.toggle('flex', !!WSP.actualizando);
+    }
   }
 
   window.wspCargarBandeja = function (mostrarCargando) {
@@ -12419,402 +11969,367 @@
     if (!lista || WSP.bandejaEnCurso) return;
     WSP.bandejaEnCurso = true;
     WSP.ultimoRefrescoModal = Date.now();
-    var pestanaPedida = WSP.pestana;
-    if (mostrarCargando && !(WSP.datos && WSP.datos._pestana === pestanaPedida)) {
-      lista.innerHTML = '<div class="text-center text-slate-500 font-bold py-10">⏳ Cargando mensajes…</div>';
+    if (mostrarCargando && !WSP.datos) {
+      lista.innerHTML = '<div class="text-center text-slate-500 font-bold py-12">⏳ Cargando resumen ejecutivo de WhatsApp…</div>';
     }
-    wspRpc('obtenerBandejaWsp', [pestanaPedida], function (res) {
+    wspRpc('obtenerBandejaWsp', [], function (res) {
       WSP.bandejaEnCurso = false;
-      if (pestanaPedida !== WSP.pestana) { wspCargarBandeja(true); return; }
-      var d = wspNormalizarBandeja(res);
-      var err = Array.isArray(res) ? '' : wspRespuestaFallida(res);
-      if (!d || (err && !d.tarjetas.length)) {
-        lista.innerHTML = '<div class="text-center text-rose-700 font-bold py-10">⚠️ No se pudo cargar la bandeja: ' + wspEsc(err || 'respuesta inválida') + '</div>';
+      var err = wspRespuestaFallida(res);
+      var d = wspNormalizarDatos(res);
+      if (!d || err) {
+        lista.innerHTML = '<div class="text-center text-rose-700 font-bold py-10">⚠️ No se pudo cargar el resumen: ' + wspEsc(err || 'respuesta inválida') + '</div>';
         return;
       }
-      d._pestana = pestanaPedida;
       WSP.datos = d;
-      if (typeof d.modo_prueba === 'boolean') WSP.modoPrueba = d.modo_prueba;
-      if (typeof d.auto_adelanto === 'boolean') WSP.autoAdelanto = d.auto_adelanto;
       wspPintarCabeceraModal();
-      wspPintarTabs();
-      wspRenderLista();
+      wspRenderModal();
     }, function (e) {
       WSP.bandejaEnCurso = false;
-      lista.innerHTML = '<div class="text-center text-rose-700 font-bold py-10">⚠️ No se pudo consultar la bandeja de WhatsApp (' + wspEsc(e && e.message ? e.message : 'error de red') + '). Reintente con 🔄.</div>';
+      lista.innerHTML = '<div class="text-center text-rose-700 font-bold py-10">⚠️ Error al consultar el resumen (' + wspEsc(e && e.message ? e.message : 'red') + '). Use "🔄 Actualizar resumen ahora".</div>';
     });
   };
 
-  function wspTextoDisponibilidad() {
-    var d = WSP.datos || {};
-    if (d.plantillas && d.plantillas.DISPONIBILIDAD) return String(d.plantillas.DISPONIBILIDAD);
-    var libres = d.libres_hoy || [];
-    if (!libres.length) {
-      // Respaldo: libres del panel cargado en pantalla
-      var porTipo = {};
-      (window.habitacionesData || []).forEach(function (h) {
-        if (String(h.estado || '').toLowerCase() !== 'libre') return;
-        var t = h.tipo || h.tipoHab || 'Habitación';
-        (porTipo[t] = porTipo[t] || { tipo: t, precio: h.precioRef || h.precio || '', habs: [] }).habs.push(h.hab);
-      });
-      libres = Object.keys(porTipo).map(function (k) { return porTipo[k]; });
-    }
-    if (!libres.length) return 'Hola 😊 En este momento estamos consultando la disponibilidad. ¿Para qué fecha y qué tipo de habitación la necesita?';
-    return 'Hola 😊 Hoy tenemos libres: ' + libres.map(function (l) {
-      return l.tipo + (l.precio ? ' S/ ' + String(l.precio).replace(/^S\/\s*/, '') : '');
-    }).join(', ') + '. ¿Cuál le separo y a qué hora llegaría?';
-  }
-
-  function wspAccionesTarjeta(t) {
-    var acc = Array.isArray(t.acciones) ? t.acciones.slice() : [];
-    if (acc.length) return acc;
-    var cat = String(t.categoria || '').toUpperCase();
-    var pl = (WSP.datos && WSP.datos.plantillas) || {};
-    var est = (t.cruce && t.cruce.estancia) || {};
-    if (cat === 'RESERVA') {
-      acc.push({ id: 'adelanto', etiqueta: '❓ Preguntar tipo y hora', tipo: 'enviar', plantilla: 'ADELANTO_RESERVA', texto: pl.ADELANTO_RESERVA || WSP_PLANTILLAS_DEF.ADELANTO_RESERVA });
-      acc.push({ id: 'dispo', etiqueta: '🛏️ Enviar disponibilidad de hoy', tipo: 'enviar', plantilla: 'DISPONIBILIDAD', texto: wspTextoDisponibilidad() });
-    } else if (cat === 'COMPROBANTE') {
-      if (est.hab) acc.push({ id: 'prellenar', etiqueta: '🧾 Pre-llenar comprobante (Hab ' + est.hab + ')', tipo: 'prellenar', hab: est.hab });
-      acc.push({ id: 'datos', etiqueta: '🪪 Pedir RUC/DNI', tipo: 'enviar', plantilla: 'COMPROBANTE_DATOS', texto: pl.COMPROBANTE_DATOS || WSP_PLANTILLAS_DEF.COMPROBANTE_DATOS });
-      acc.push({ id: 'proceso', etiqueta: '⏳ "En unos minutos se lo enviamos"', tipo: 'enviar', plantilla: 'COMPROBANTE_EN_PROCESO', texto: pl.COMPROBANTE_EN_PROCESO || WSP_PLANTILLAS_DEF.COMPROBANTE_EN_PROCESO });
-    } else if (cat === 'HABITACION') {
-      acc.push({ id: 'recibido', etiqueta: '👍 Recibido, enseguida', tipo: 'enviar', plantilla: 'HAB_RECIBIDO', texto: pl.HAB_RECIBIDO || WSP_PLANTILLAS_DEF.HAB_RECIBIDO });
-    } else if (cat === 'VOUCHER') {
-      acc.push({ id: 'yapes', etiqueta: '📱 Ver en Yapes', tipo: 'ver_yapes' });
-    }
-    return acc;
-  }
-
-  function wspClaseAccion(a) {
-    var tipo = String(a.tipo || '');
-    if (tipo === 'prellenar') return 'bg-sky-700 hover:bg-sky-800 text-white border-sky-900';
-    if (tipo === 'ver_yapes') return 'bg-emerald-700 hover:bg-emerald-800 text-white border-emerald-900';
-    return 'bg-white hover:bg-emerald-50 text-emerald-900 border-emerald-400';
-  }
-
-  function wspFilaFicha(etq, val, extra) {
-    if (val === undefined || val === null || val === '' || val === '-') val = '—';
-    return '<div class="flex justify-between gap-2 py-0.5 border-b border-slate-100"><span class="text-slate-500 text-[10.5px]">' + wspEsc(etq) +
-      '</span><span class="font-bold text-slate-900 text-right ' + (extra || '') + '">' + wspEsc(val) + '</span></div>';
-  }
-
-  function wspRenderFicha(t) {
-    var cr = t.cruce || {};
-    var e = cr.estancia || null;
-    var cat = String(t.categoria || '').toUpperCase();
-    var h = '';
-    var via = cr.via ? String(cr.via) : '';
-    h += '<div class="flex items-center justify-between mb-1.5">' +
-         '<div class="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">Cruce con la base</div>' +
-         (via ? '<span class="text-[10px] font-black px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-900 border border-indigo-300">vía ' + wspEsc(via) + '</span>'
-              : '<span class="text-[10px] font-black px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200">sin coincidencia</span>') +
-         '</div>';
-    if (e) {
-      var tarifaTxt = (e.tarifa !== undefined && e.tarifa !== null && e.tarifa !== '') ? wspSoles(e.tarifa) + (e.noches ? ' × ' + e.noches + ' noche' + (wspNum(e.noches) === 1 ? '' : 's') : '') : '—';
-      var saldo = (cr.pagos && cr.pagos.saldo !== undefined) ? cr.pagos.saldo : e.saldo;
-      var pagado = (e.pagado !== undefined) ? e.pagado : (cr.pagos && cr.pagos.total);
-      var comp = [e.tipo_comp, e.estado_comp, e.nro_comp].filter(function (x) { return x; }).join(' · ');
-      if (!comp && cr.comprobante) comp = [cr.comprobante.tipo, cr.comprobante.estado, cr.comprobante.nro].filter(function (x) { return x; }).join(' · ');
-      h += '<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4">';
-      h += wspFilaFicha('Hab', e.hab ? 'Hab ' + e.hab + (e.tipo_hab ? ' · ' + e.tipo_hab : '') : '');
-      h += wspFilaFicha('Huésped', e.huesped || (typeof cr.huesped === 'string' ? cr.huesped : ''));
-      h += wspFilaFicha('DNI / RUC', [e.dni, e.ruc].filter(function (x) { return x; }).join(' / '));
-      h += wspFilaFicha('Empresa', e.empresa);
-      h += wspFilaFicha('Check-in', e.check_in);
-      h += wspFilaFicha('Check-out', e.check_out);
-      h += wspFilaFicha('Tarifa × noches', tarifaTxt);
-      h += wspFilaFicha('Pagado', wspSoles(pagado), 'text-emerald-700');
-      h += wspFilaFicha('Saldo', wspSoles(saldo), wspNum(saldo) > 0 ? 'text-rose-700' : 'text-emerald-700');
-      h += wspFilaFicha('Comprobante', comp);
-      h += wspFilaFicha('Estado', e.estado_estancia);
-      h += wspFilaFicha('Celular', e.celular);
-      h += '</div>';
-    } else {
-      var ent = t.entidades || {};
-      var pistas = [];
-      if (ent.habs && ent.habs.length) pistas.push('Hab ' + ent.habs.join(', '));
-      if (ent.dni) pistas.push('DNI ' + ent.dni);
-      if (ent.ruc) pistas.push('RUC ' + ent.ruc);
-      if (ent.tipo_hab) pistas.push('Tipo: ' + ent.tipo_hab);
-      if (ent.precio_ref) pistas.push('Precio ref. S/ ' + ent.precio_ref);
-      if (ent.fecha_ref) pistas.push('Fecha: ' + ent.fecha_ref);
-      if (ent.montos && ent.montos.length) pistas.push('Montos: ' + ent.montos.map(function (m) { return 'S/ ' + m; }).join(', '));
-      h += '<div class="text-[11px] text-slate-500 italic">No se encontró una estancia para este número ni para los datos del mensaje.</div>';
-      if (pistas.length) h += '<div class="mt-1 text-[11px] text-slate-700"><b>Datos detectados:</b> ' + wspEsc(pistas.join(' · ')) + '</div>';
-    }
-    var au = cr.auditoria_25;
-    if (au && (cat === 'COMPROBANTE' || au.ya_emitido || (au.observaciones && au.observaciones.length))) {
-      h += '<div class="mt-2 rounded-lg border ' + (au.ya_emitido ? 'border-emerald-300 bg-emerald-50' : 'border-amber-300 bg-amber-50') + ' p-2 text-[11px]">';
-      if (au.ya_emitido) h += '<div class="font-black text-emerald-900">✅ Ya emitido ' + wspEsc(au.ya_emitido) + '</div>';
-      if (wspNum(au.falta_adicional) > 0) h += '<div class="font-black text-amber-900">Regla 25 %: falta adicional ' + wspEsc(wspSoles(au.falta_adicional)) + '</div>';
-      (au.observaciones || []).forEach(function (o) { h += '<div class="text-amber-950">• ' + wspEsc(o) + '</div>'; });
-      h += '</div>';
-    }
-    if (cat === 'RESERVA') {
-      var libres = (Array.isArray(t.libres) && t.libres.length) ? t.libres : ((WSP.datos && WSP.datos.libres_hoy) || []);
-      if (libres.length) {
-        h += '<div class="mt-2 rounded-lg border border-violet-200 bg-violet-50 p-2"><div class="text-[10px] font-extrabold uppercase text-violet-800 mb-1">Libres hoy</div><div class="flex flex-wrap gap-1">';
-        libres.forEach(function (l) {
-          h += '<span class="px-1.5 py-0.5 rounded bg-white border border-violet-300 text-[10.5px] font-bold text-violet-950">' +
-               wspEsc(l.tipo) + (l.precio ? ' S/ ' + wspEsc(String(l.precio).replace(/^S\/\s*/, '')) : '') +
-               (l.habs && l.habs.length ? ' <span class="text-violet-500">(' + wspEsc(l.habs.join(', ')) + ')</span>' : '') + '</span>';
-        });
-        h += '</div></div>';
+  window.wspActualizarAhora = function () {
+    if (WSP.actualizando) return;
+    WSP.actualizando = true;
+    wspPintarCabeceraModal();
+    wspRpc('actualizarResumenWspAhora', [], function (res) {
+      WSP.actualizando = false;
+      var err = wspRespuestaFallida(res);
+      var d = wspNormalizarDatos(res);
+      if (!d || err) {
+        wspPintarCabeceraModal();
+        wspToast('❌ No se pudo regenerar el resumen: ' + (err || 'respuesta inválida'), 'error');
+        return;
       }
-    }
-    return h;
-  }
+      WSP.datos = d;
+      WSP.ultimoRefrescoModal = Date.now();
+      wspPintarCabeceraModal();
+      wspRenderModal();
+      wspCargarAlertas(true);
+      wspToast('✅ Resumen ejecutivo actualizado (' + (d.ultimo_corte_hora || 'ahora') + ')', 'ok');
+    }, function (e) {
+      WSP.actualizando = false;
+      wspPintarCabeceraModal();
+      wspToast('❌ Error al actualizar el resumen: ' + (e && e.message ? e.message : 'red'), 'error');
+    });
+  };
 
-  function wspRenderTarjeta(t, idx) {
-    var cat = String(t.categoria || '').toUpperCase();
-    var c = wspCat(cat);
-    var nivel = String(t.nivel || '').toUpperCase();
-    var m = wspNum(t.espera_min);
-    var esperaCls = nivel === 'ROJO' ? 'bg-red-600 text-white border-red-800' :
-                    nivel === 'AMBAR' ? 'bg-amber-100 text-amber-900 border-amber-500' :
-                    'bg-slate-100 text-slate-600 border-slate-300';
-    var bordeCard = nivel === 'ROJO' ? 'border-red-500' : nivel === 'AMBAR' ? 'border-amber-400' : 'border-slate-200';
-    var h = '<div class="bg-white rounded-xl border-2 ' + bordeCard + ' shadow-xs grid grid-cols-1 lg:grid-cols-2 overflow-hidden" data-wsp-card="' + idx + '">';
-
-    // Columna izquierda: chat
-    h += '<div class="p-3 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col min-w-0">';
-    h += '<div class="flex flex-wrap items-center gap-1.5 mb-2">';
-    h += '<span class="font-black text-[13px] text-slate-900 truncate max-w-[260px]">' + wspEsc(t.nombre || t.jid || 'Sin nombre') + '</span>';
-    if (t.celular9) h += '<span class="text-[10.5px] font-mono text-slate-500">📱 ' + wspEsc(t.celular9) + '</span>';
-    h += '<span class="text-[10.5px] font-black px-1.5 py-0.5 rounded border ' + c.chip + '" title="Confianza: ' + wspEsc(Math.round(wspNum(t.confianza) * 100)) + ' %">' + c.ico + ' ' + wspEsc(c.lbl) + '</span>';
-    if (t.espera_min !== undefined && t.espera_min !== null && nivel && nivel !== 'OK') {
-      h += '<span class="ml-auto text-[10.5px] font-black px-1.5 py-0.5 rounded border ' + esperaCls + '">' + (nivel === 'ROJO' ? '⏰ ' + m + ' min sin responder' : 'hace ' + m + ' min') + '</span>';
+  // ---------------------------------------------------------------- render de los 3 bloques
+  function wspRenderBurbujas(mensajes) {
+    var msgs = Array.isArray(mensajes) ? mensajes : [];
+    if (!msgs.length) {
+      return '<div class="text-[11px] text-slate-400 italic py-1">Sin mensajes literales adjuntos en este corte.</div>';
     }
-    h += '</div>';
-    h += '<div class="flex flex-col gap-1.5 max-h-[300px] overflow-y-auto pr-1">';
-    var msgs = Array.isArray(t.mensajes) ? t.mensajes : [];
-    if (!msgs.length) h += '<div class="text-slate-400 italic">Sin mensajes</div>';
+    var h = '<div class="mt-2 p-2.5 rounded-lg bg-white border border-slate-200 flex flex-col gap-1.5 max-h-[260px] overflow-y-auto">';
     msgs.forEach(function (mm) {
       var mio = mm.es_mio === 1 || mm.es_mio === true || mm.es_mio === '1';
       var tipo = String(mm.tipo || '').toLowerCase();
       var cuerpo = mm.texto ? String(mm.texto) : (tipo && tipo !== 'texto' && tipo !== 'conversation' ? '[' + tipo + ']' : '');
-      h += '<div class="wsp-burbuja ' + (mio ? 'wsp-burbuja-rec' : 'wsp-burbuja-cli') + ' px-2.5 py-1.5 text-[12px]">' +
+      h += '<div class="wsp-burbuja ' + (mio ? 'wsp-burbuja-rec' : 'wsp-burbuja-cli') + ' px-2.5 py-1.5 text-[11.5px]">' +
            wspEsc(cuerpo) +
-           '<div class="text-[9.5px] ' + (mio ? 'text-emerald-700' : 'text-slate-400') + ' text-right mt-0.5">' + (mio ? 'Recepción · ' : '') + wspEsc(mm.hora || '') + '</div></div>';
+           '<div class="text-[9.5px] ' + (mio ? 'text-emerald-700' : 'text-slate-400') + ' text-right mt-0.5">' +
+           (mio ? 'Recepción' : 'Cliente') + (mm.hora ? ' · ' + wspEsc(mm.hora) : '') + '</div></div>';
     });
-    h += '</div></div>';
-
-    // Columna derecha: cruce + botones
-    h += '<div class="p-3 flex flex-col min-w-0 bg-slate-50/40">';
-    h += wspRenderFicha(t);
-    h += '<div class="mt-auto pt-3 flex flex-wrap gap-1.5">';
-    var acc = wspAccionesTarjeta(t);
-    t._acciones = acc;
-    acc.forEach(function (a, ai) {
-      h += '<button type="button" data-wsp-accion="' + ai + '" data-wsp-idx="' + idx + '" ' +
-           'class="px-2.5 py-1.5 rounded-lg border text-[11px] font-black cursor-pointer transition-colors ' + wspClaseAccion(a) + '" ' +
-           'title="' + wspEsc(a.texto || a.etiqueta || '') + '">' + wspEsc(a.etiqueta || a.id || 'Acción') + '</button>';
-    });
-    h += '<button type="button" data-wsp-accion="escribir" data-wsp-idx="' + idx + '" class="px-2.5 py-1.5 rounded-lg border border-slate-400 bg-white hover:bg-slate-100 text-slate-800 text-[11px] font-black cursor-pointer">✏️ Escribir respuesta</button>';
-    h += '<button type="button" data-wsp-accion="atendido" data-wsp-idx="' + idx + '" class="px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-black cursor-pointer" title="Para cuando se resolvió por llamada o en persona (queda registrado quién y cuándo)">✔️ Marcar atendido</button>';
-    h += '</div></div>';
     h += '</div>';
     return h;
   }
 
-  function wspRenderLista() {
+  function wspFilaFicha(etq, val, clsVal) {
+    var txt = (val === undefined || val === null || val === '' || val === '-') ? '—' : String(val);
+    return '<div class="flex justify-between gap-2 py-0.5 border-b border-slate-100">' +
+           '<span class="text-slate-500 text-[10.5px]">' + wspEsc(etq) + '</span>' +
+           '<span class="font-bold text-right ' + (clsVal || 'text-slate-900') + '">' + wspEsc(txt) + '</span></div>';
+  }
+
+  function wspRenderCrucePendiente(it) {
+    var raw = it.cruce || {};
+    var est = raw.estancia || {};
+    var hab = raw.hab || est.hab || '';
+    var huesped = raw.huesped || est.huesped || '';
+    var dniRuc = raw.dni_ruc || [raw.dni || est.dni, raw.ruc || est.ruc].filter(Boolean).join(' / ');
+    var checkIn = raw.check_in || est.check_in || '';
+    var checkOut = raw.check_out || est.check_out || '';
+    var fechas = [checkIn, checkOut].filter(Boolean).join(' → ');
+    var tarifaNoches = raw.tarifa_noches || (est.tarifa !== undefined && est.tarifa !== null && est.tarifa !== ''
+      ? wspMontoTexto(est.tarifa) + (est.noches ? ' × ' + est.noches + ' noche' + (wspNum(est.noches) === 1 ? '' : 's') : '') : '');
+    var pagado = (raw.pagado !== undefined && raw.pagado !== null) ? raw.pagado : est.pagado;
+    var saldo = (raw.saldo !== undefined && raw.saldo !== null) ? raw.saldo : est.saldo;
+    var estadoSunat = raw.estado_sunat || [est.tipo_comp, est.estado_comp, est.nro_comp].filter(Boolean).join(' · ');
+    var obs25 = raw.observacion_25 || '';
+    var via = raw.via || '';
+    var encontrado = (typeof raw.encontrado === 'boolean') ? raw.encontrado : Boolean(hab || huesped || dniRuc);
+
+    var h = '<div class="flex items-center justify-between mb-1.5">' +
+            '<span class="text-[10px] font-extrabold uppercase tracking-wide text-slate-400">Ficha cruzada (Estancia / SUNAT)</span>' +
+            (encontrado
+              ? '<span class="text-[10px] font-black px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-900 border border-indigo-300">' + wspEsc(via ? 'vía ' + via : 'cruzado') + '</span>'
+              : '<span class="text-[10px] font-black px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 border border-slate-200">sin coincidencia</span>') +
+            '</div>';
+
+    if (!encontrado) {
+      h += '<div class="text-[11px] text-slate-500 italic py-2">No se encontró estancia activa o reciente asociada a este celular ni a los datos mencionados.</div>';
+      return h;
+    }
+
+    var saldoNum = Number(saldo);
+    var clsSaldo = (isFinite(saldoNum) && saldoNum > 0) ? 'text-rose-700' : 'text-emerald-700';
+
+    h += '<div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4">';
+    h += wspFilaFicha('Habitación', hab ? 'Hab ' + hab : '—');
+    h += wspFilaFicha('Huésped', huesped);
+    h += wspFilaFicha('DNI / RUC', dniRuc);
+    h += wspFilaFicha('Fechas', fechas);
+    h += wspFilaFicha('Tarifa × noches', tarifaNoches);
+    h += wspFilaFicha('Pagado', wspMontoTexto(pagado), 'text-emerald-700');
+    h += wspFilaFicha('Saldo', wspMontoTexto(saldo), clsSaldo);
+    h += wspFilaFicha('Estado SUNAT', estadoSunat);
+    h += '</div>';
+
+    if (obs25) {
+      var obsConforme = String(obs25).toLowerCase().indexOf('conforme') >= 0;
+      h += '<div class="mt-2 rounded-lg border px-2.5 py-1.5 text-[11px] ' +
+           (obsConforme ? 'border-emerald-300 bg-emerald-50 text-emerald-950' : 'border-amber-300 bg-amber-50 text-amber-950') + '">' +
+           '<span class="font-black">' + (obsConforme ? '✅' : '⚖️') + ' Regla 25 % / Auditoría:</span> ' + wspEsc(obs25) + '</div>';
+    }
+
+    var esComp = String(it.tipo || '').toUpperCase().indexOf('COMPROBANTE') >= 0;
+    if (hab && esComp) {
+      h += '<div class="mt-2 pt-1 flex justify-end">' +
+           '<button type="button" data-wsp-consulta-hab="' + wspEsc(hab) + '" ' +
+           'class="text-[11px] font-black text-sky-800 hover:text-sky-950 bg-sky-50 hover:bg-sky-100 border border-sky-300 rounded-md px-2.5 py-1 cursor-pointer transition-colors" ' +
+           'title="Abrir la ficha de facturación de la Hab ' + wspEsc(hab) + ' en el panel">' +
+           '🔎 Consultar ficha de facturación (Hab ' + wspEsc(hab) + ')</button></div>';
+    }
+    return h;
+  }
+
+  function wspRenderBloquePendientes(items) {
+    var h = '<section id="wspBloquePendientes" class="space-y-2.5">';
+    h += '<div class="flex items-center justify-between border-b border-rose-200 pb-1.5">' +
+         '<h4 class="font-black text-[13px] text-rose-900 flex items-center gap-1.5">🔴 1. Falta Responder o Entregar ' +
+         '<span class="px-2 py-0.5 rounded-full text-[11px] ' + (items.length ? 'bg-rose-600 text-white' : 'bg-emerald-100 text-emerald-800') + '">' + items.length + '</span></h4>' +
+         '<span class="text-[10.5px] text-slate-500 font-semibold">Consultas abiertas o comprobantes pendientes de envío</span></div>';
+
+    if (!items.length) {
+      h += '<div class="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-emerald-900 font-bold text-[12px]">' +
+           '✅ Todo respondido: no se detectan consultas ni comprobantes pendientes en los chats.</div>';
+      h += '</section>';
+      return h;
+    }
+
+    items.forEach(function (it) {
+      var tm = wspTipoMeta(it.tipo);
+      var cliente = it.cliente || it.nombre || it.jid || 'Cliente';
+      var celular = it.celular || it.celular9 || '';
+      var hora = it.hora_ultimo_msg || it.hora || '';
+      var espMin = (it.espera_min !== undefined && it.espera_min !== null && it.espera_min !== '') ? wspNum(it.espera_min) : null;
+      var msgs = Array.isArray(it.mensajes) ? it.mensajes : [];
+
+      h += '<div class="bg-white rounded-xl border-2 border-rose-300 shadow-xs grid grid-cols-1 lg:grid-cols-2 overflow-hidden">';
+      // Izquierda: contexto del Agente + mensajes desplegables
+      h += '<div class="p-3.5 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col justify-between">';
+      h += '<div>';
+      h += '<div class="flex flex-wrap items-center gap-1.5 mb-2">';
+      h += '<span class="font-black text-[13px] text-slate-900">' + wspEsc(cliente) + '</span>';
+      if (celular && cliente.indexOf(celular) < 0) {
+        h += '<span class="text-[10.5px] font-mono text-slate-500">📱 ' + wspEsc(celular) + '</span>';
+      }
+      h += '<span class="text-[10.5px] font-black px-2 py-0.5 rounded border ' + tm.cls + '">' + tm.ico + ' ' + wspEsc(tm.lbl) + '</span>';
+      if (hora) {
+        h += '<span class="ml-auto text-[10.5px] font-bold text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">🕒 ' + wspEsc(hora) +
+             (espMin !== null && espMin > 0 ? ' · hace ' + espMin + ' min' : '') + '</span>';
+      }
+      h += '</div>';
+      h += '<div class="rounded-lg bg-rose-50/70 border border-rose-200 px-3 py-2 text-[12px] text-slate-800 leading-relaxed">' +
+           '<span class="font-black text-rose-900">Motivo pendiente: </span>' + wspEsc(it.motivo_pendiente || 'Pendiente de revisión por Recepción.') + '</div>';
+      h += '</div>';
+
+      h += '<details class="wsp-details mt-2.5">' +
+           '<summary class="inline-flex items-center gap-1 text-[11px] font-extrabold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 px-2.5 py-1 rounded-md border border-slate-300">' +
+           '👁️ Ver mensajes del chat (' + msgs.length + ')</summary>' +
+           wspRenderBurbujas(msgs) + '</details>';
+      h += '</div>';
+
+      // Derecha: ficha de cruce
+      h += '<div class="p-3.5 bg-slate-50/60 flex flex-col justify-between">' + wspRenderCrucePendiente(it) + '</div>';
+      h += '</div>';
+    });
+
+    h += '</section>';
+    return h;
+  }
+
+  function wspRenderBloqueNotas(items) {
+    var h = '<section id="wspBloqueNotas" class="space-y-2">';
+    h += '<div class="flex items-center justify-between border-b border-amber-200 pb-1.5">' +
+         '<h4 class="font-black text-[13px] text-amber-950 flex items-center gap-1.5">💡 2. Recomendaciones, Reclamos o Acuerdos Detectados ' +
+         '<span class="px-2 py-0.5 rounded-full text-[11px] bg-amber-200 text-amber-950">' + items.length + '</span></h4>' +
+         '<span class="text-[10.5px] text-slate-500 font-semibold">Encargos de llaves, visitas, observaciones o quejas en los textos</span></div>';
+
+    if (!items.length) {
+      h += '<div class="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-slate-500 italic text-[11.5px]">' +
+           'Sin reclamos, acuerdos especiales ni recomendaciones detectadas en este corte.</div>';
+      h += '</section>';
+      return h;
+    }
+
+    h += '<div class="grid grid-cols-1 md:grid-cols-2 gap-2.5">';
+    items.forEach(function (it) {
+      var nm = wspNotaMeta(it.tipo_nota);
+      var cliente = it.cliente || it.jid || 'Huésped';
+      var hab = it.hab ? String(it.hab) : '';
+      var celular = it.celular ? String(it.celular) : '';
+      h += '<div class="rounded-xl border p-3 shadow-2xs ' + nm.borde + ' flex flex-col gap-1.5">';
+      h += '<div class="flex flex-wrap items-center gap-1.5">';
+      h += '<span class="text-[10.5px] font-black px-2 py-0.5 rounded border ' + nm.cls + '">' + nm.ico + ' ' + wspEsc(nm.lbl) + '</span>';
+      h += '<span class="font-black text-[12px] text-slate-900">' + wspEsc(cliente) + '</span>';
+      if (hab && cliente.indexOf(hab) < 0) {
+        h += '<span class="text-[10.5px] font-black px-1.5 py-0.5 rounded bg-white border border-slate-300 text-slate-800">Hab ' + wspEsc(hab) + '</span>';
+      }
+      if (celular && cliente.indexOf(celular) < 0) {
+        h += '<span class="text-[10.5px] font-mono text-slate-500">📱 ' + wspEsc(celular) + '</span>';
+      }
+      if (it.hora) {
+        h += '<span class="ml-auto text-[10.5px] font-semibold text-slate-500">🕒 ' + wspEsc(it.hora) + '</span>';
+      }
+      h += '</div>';
+      h += '<div class="text-[12px] text-slate-800 leading-relaxed">' + wspEsc(it.detalle || '') + '</div>';
+      if (Array.isArray(it.mensajes) && it.mensajes.length) {
+        h += '<details class="wsp-details mt-1">' +
+             '<summary class="inline-flex items-center gap-1 text-[10.5px] font-bold text-slate-600 hover:text-slate-900 bg-white/80 px-2 py-0.5 rounded border border-slate-300">👁️ Ver mensajes (' + it.mensajes.length + ')</summary>' +
+             wspRenderBurbujas(it.mensajes) + '</details>';
+      }
+      h += '</div>';
+    });
+    h += '</div></section>';
+    return h;
+  }
+
+  function wspRenderBloqueAtendidos(items) {
+    var h = '<section id="wspBloqueAtendidos" class="space-y-2">';
+    h += '<div class="flex items-center justify-between border-b border-emerald-200 pb-1.5">' +
+         '<h4 class="font-black text-[13px] text-emerald-950 flex items-center gap-1.5">✅ 3. Chats Atendidos — ¿Por qué dijeron "Gracias"? ' +
+         '<span class="px-2 py-0.5 rounded-full text-[11px] bg-emerald-200 text-emerald-950">' + items.length + '</span></h4>' +
+         '<span class="text-[10.5px] text-slate-500 font-semibold">Resumen de 1 línea por conversación cerrada</span></div>';
+
+    if (!items.length) {
+      h += '<div class="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-slate-500 italic text-[11.5px]">' +
+           'Aún no figuran chats atendidos en este corte.</div>';
+      h += '</section>';
+      return h;
+    }
+
+    h += '<div class="bg-white rounded-xl border border-slate-200 divide-y divide-slate-200 overflow-hidden shadow-2xs">';
+    items.forEach(function (it) {
+      var cliente = it.cliente || it.jid || 'Cliente';
+      var hab = it.hab ? String(it.hab) : '';
+      var celular = it.celular ? String(it.celular) : '';
+      var hora = it.hora ? String(it.hora) : '';
+      var msgs = Array.isArray(it.mensajes) ? it.mensajes : [];
+
+      h += '<div class="p-3 hover:bg-slate-50/70 transition-colors">';
+      h += '<div class="flex flex-wrap items-start justify-between gap-2">';
+      h += '<div class="space-y-1 min-w-0 flex-1">';
+      h += '<div class="flex flex-wrap items-center gap-1.5">';
+      h += '<span class="font-black text-[12.5px] text-slate-900">' + wspEsc(cliente) + '</span>';
+      if (hab && cliente.indexOf(hab) < 0) {
+        h += '<span class="text-[10.5px] font-black px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-300 text-emerald-900">Hab ' + wspEsc(hab) + '</span>';
+      }
+      if (celular && cliente.indexOf(celular) < 0) {
+        h += '<span class="text-[10.5px] font-mono text-slate-500">📱 ' + wspEsc(celular) + '</span>';
+      }
+      if (hora) {
+        h += '<span class="text-[10.5px] font-semibold text-slate-400">🕒 ' + wspEsc(hora) + '</span>';
+      }
+      h += '</div>';
+      h += '<div class="text-[11.5px] text-slate-700"><span class="font-black text-slate-900">Qué pidió:</span> ' + wspEsc(it.que_pidio || '—') + '</div>';
+      h += '<div class="text-[11.5px] text-emerald-900"><span class="font-black">Cierre / Por qué agradeció:</span> ' + wspEsc(it.por_que_agradecio || '—') + '</div>';
+      h += '</div>';
+
+      if (msgs.length) {
+        h += '<details class="wsp-details shrink-0">' +
+             '<summary class="inline-flex items-center gap-1 text-[10.5px] font-extrabold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-md border border-slate-300">' +
+             '👁️ Ver mensajes (' + msgs.length + ')</summary>' +
+             '<div class="w-full sm:w-[420px] max-w-[82vw]">' + wspRenderBurbujas(msgs) + '</div></details>';
+      }
+      h += '</div></div>';
+    });
+    h += '</div></section>';
+    return h;
+  }
+
+  function wspRenderModal() {
     var lista = wspEl('wspBandejaLista');
     if (!lista) return;
-    var d = WSP.datos || { tarjetas: [] };
-    var info = wspEl('wspBandejaInfo');
-    if (info) info.textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    if (!d.tarjetas.length) {
-      lista.innerHTML = '<div class="text-center py-14"><div class="text-3xl mb-2">✅</div><div class="font-black text-slate-700 text-[13px]">' +
-        (WSP.pestana === 'PENDIENTES' ? 'WhatsApp al día: no hay mensajes pendientes.' : 'No hay chats en esta pestaña.') + '</div></div>';
-      return;
+    var d = WSP.datos || { pendientes_responder: [], recomendaciones_y_notas: [], atendidos_y_gracias: [] };
+
+    var txtGen = wspEl('wspResumenGeneralTexto');
+    if (txtGen) {
+      txtGen.textContent = d.resumen_general_turno || 'Resumen de las conversaciones recientes recibidas en el WhatsApp de Recepción.';
     }
+
+    var cnt = wspEl('wspResumenContadores');
+    if (cnt) {
+      var nP = d.pendientes_responder.length;
+      var nN = d.recomendaciones_y_notas.length;
+      var nA = d.atendidos_y_gracias.length;
+      cnt.innerHTML =
+        '<button type="button" data-wsp-ir="wspBloquePendientes" class="px-2 py-0.5 rounded border cursor-pointer ' +
+          (nP ? 'bg-rose-600 text-white border-rose-700' : 'bg-white text-slate-700 border-slate-300') + '">🔴 ' + nP + ' por responder</button>' +
+        '<button type="button" data-wsp-ir="wspBloqueNotas" class="px-2 py-0.5 rounded border bg-amber-100 text-amber-950 border-amber-300 cursor-pointer">💡 ' + nN + ' notas/acuerdos</button>' +
+        '<button type="button" data-wsp-ir="wspBloqueAtendidos" class="px-2 py-0.5 rounded border bg-emerald-100 text-emerald-950 border-emerald-300 cursor-pointer">✅ ' + nA + ' atendidos</button>';
+    }
+
     var scroll = lista.scrollTop;
-    lista.innerHTML = d.tarjetas.map(wspRenderTarjeta).join('');
+    lista.innerHTML =
+      wspRenderBloquePendientes(d.pendientes_responder) +
+      wspRenderBloqueNotas(d.recomendaciones_y_notas) +
+      wspRenderBloqueAtendidos(d.atendidos_y_gracias);
     lista.scrollTop = scroll;
   }
 
-  // ---------------------------------------------------------------- acciones
-  function wspTarjeta(idx) {
-    var d = WSP.datos;
-    return (d && d.tarjetas && d.tarjetas[idx]) || null;
-  }
-
-  function wspAbrirConfirm(t, texto, plantilla, etiqueta) {
-    WSP.confirm = { jid: t.jid, nombre: t.nombre || t.jid, plantilla: plantilla || '' };
-    wspEl('wspConfirmDest').textContent = (t.nombre || t.jid || '') + (t.celular9 ? ' (' + t.celular9 + ')' : '');
-    wspEl('wspConfirmPlantilla').textContent = plantilla ? 'Plantilla: ' + plantilla + (etiqueta ? ' — ' + etiqueta : '') + ' · puede editar el texto antes de enviar' : 'Respuesta libre';
-    var ta = wspEl('wspConfirmTexto');
-    ta.value = texto || '';
-    wspEl('wspConfirmAviso').classList.toggle('hidden', !WSP.modoPrueba);
-    var btn = wspEl('wspConfirmBtn');
-    btn.disabled = false;
-    btn.textContent = WSP.modoPrueba ? '🧪 Enviar (simulado)' : '📤 Enviar';
-    var c = wspEl('wspConfirm');
-    c.classList.remove('hidden');
-    c.classList.add('flex');
-    setTimeout(function () { ta.focus(); }, 30);
-  }
-
-  window.wspCerrarConfirm = function () {
-    var c = wspEl('wspConfirm');
-    if (!c) return;
-    c.classList.add('hidden');
-    c.classList.remove('flex');
-    WSP.confirm = null;
-  };
-
-  window.wspConfirmarEnvio = function () {
-    var cf = WSP.confirm;
-    if (!cf) return;
-    var texto = String(wspEl('wspConfirmTexto').value || '').trim();
-    if (!texto) { wspToast('Escriba el texto de la respuesta', 'error'); return; }
-    var btn = wspEl('wspConfirmBtn');
-    btn.disabled = true;
-    btn.textContent = 'Enviando…';
-    wspRpc('enviarRespuestaWsp', [{ jid: cf.jid, texto: texto, plantilla: cf.plantilla, usuario: wspUsuario() }], function (res) {
-      var err = wspRespuestaFallida(res);
-      if (err) {
-        btn.disabled = false;
-        btn.textContent = WSP.modoPrueba ? '🧪 Enviar (simulado)' : '📤 Enviar';
-        wspToast('❌ No se pudo enviar: ' + err, 'error');
-        return;
-      }
-      var simulado = !!(res && (res.simulado || res.modo_prueba || String(res.estado || '').toUpperCase() === 'SIMULADO')) || WSP.modoPrueba;
-      wspCerrarConfirm();
-      wspToast(simulado ? '🧪 Simulado: no se envió por WhatsApp' : '✅ Respuesta en cola de envío de WhatsApp', simulado ? 'sim' : 'ok');
-      wspCargarBandeja(false);
-      wspCargarAlertas(true);
-    }, function (e) {
-      btn.disabled = false;
-      btn.textContent = WSP.modoPrueba ? '🧪 Enviar (simulado)' : '📤 Enviar';
-      wspToast('❌ Error al enviar: ' + (e && e.message ? e.message : 'red'), 'error');
-    });
-  };
-
-  function wspMarcarAtendido(t, boton) {
-    if (boton) { boton.disabled = true; boton.textContent = '…'; }
-    wspRpc('marcarChatWspAtendido', [{ jid: t.jid, usuario: wspUsuario() }], function (res) {
-      var err = wspRespuestaFallida(res);
-      if (err) {
-        if (boton) { boton.disabled = false; boton.textContent = '✔️ Marcar atendido'; }
-        wspToast('❌ ' + err, 'error');
-        return;
-      }
-      wspToast('✔️ Chat de ' + (t.nombre || t.jid) + ' marcado como atendido', 'ok');
-      wspCargarBandeja(false);
-      wspCargarAlertas(true);
-    }, function (e) {
-      if (boton) { boton.disabled = false; boton.textContent = '✔️ Marcar atendido'; }
-      wspToast('❌ Error: ' + (e && e.message ? e.message : 'red'), 'error');
-    });
-  }
-
-  function wspPrellenar(ev, hab) {
+  function wspConsultarFacturacion(ev, hab) {
     var h = (window.habitacionesData || []).find(function (x) { return String(x.hab) === String(hab); });
     if (!h || String(h.estado || '').toLowerCase() === 'libre') {
-      wspToast('La Hab ' + hab + ' no tiene una estancia activa en el panel de la fecha mostrada', 'error');
+      wspToast('ℹ️ La Hab ' + hab + ' no figura ocupada en la fecha visible del panel', 'info');
       return;
     }
-    if (typeof window.verDetalleFacturacion !== 'function') { wspToast('Función de facturación no disponible', 'error'); return; }
+    if (typeof window.verDetalleFacturacion !== 'function') {
+      wspToast('ℹ️ Vista de facturación no disponible', 'info');
+      return;
+    }
     cerrarModalWspBandeja();
     window.verDetalleFacturacion(ev, hab);
   }
 
-  function wspClickLista(ev) {
-    var b = ev.target.closest('[data-wsp-accion]');
-    if (!b) return;
-    var t = wspTarjeta(Number(b.getAttribute('data-wsp-idx')));
-    if (!t) return;
-    var a = b.getAttribute('data-wsp-accion');
-    if (a === 'escribir') { wspAbrirConfirm(t, '', '', ''); return; }
-    if (a === 'atendido') { wspMarcarAtendido(t, b); return; }
-    var acc = (t._acciones || [])[Number(a)];
-    if (!acc) return;
-    var tipo = String(acc.tipo || 'enviar');
-    if (tipo === 'prellenar') {
-      var hab = acc.hab || (t.cruce && t.cruce.estancia && t.cruce.estancia.hab);
-      if (!hab) { wspToast('No hay habitación cruzada para pre-llenar', 'error'); return; }
-      wspPrellenar(ev, hab);
-    } else if (tipo === 'ver_yapes') {
-      if (typeof window.abrirModalYapeComprobador === 'function') { cerrarModalWspBandeja(); window.abrirModalYapeComprobador(); }
-      else wspToast('Lista de Yapes no disponible', 'error');
-    } else {
-      var texto = acc.texto || (acc.plantilla === 'DISPONIBILIDAD' ? wspTextoDisponibilidad() : (WSP_PLANTILLAS_DEF[acc.plantilla] || ''));
-      wspAbrirConfirm(t, texto, acc.plantilla || '', acc.etiqueta || '');
-    }
-  }
-
-  window.wspToggleAutoAdelanto = function () {
-    var nuevo = !WSP.autoAdelanto;
-    wspRpc('configurarAutoAdelantoWsp', [{ activo: nuevo, usuario: wspUsuario() }], function (res) {
-      var err = wspRespuestaFallida(res);
-      if (err) { wspToast('❌ ' + err, 'error'); return; }
-      WSP.autoAdelanto = (res && typeof res.activo === 'boolean') ? res.activo : nuevo;
-      if (res && typeof res.modo_prueba === 'boolean') WSP.modoPrueba = res.modo_prueba;
-      wspPintarCabeceraModal();
-      wspToast(WSP.autoAdelanto ? '⏱️ Auto-adelanto de reservas ACTIVADO (3 min)' + (WSP.modoPrueba ? ' · simulado' : '') : 'Auto-adelanto de reservas desactivado', WSP.modoPrueba ? 'sim' : 'ok');
-    }, function (e) {
-      wspToast('❌ No se pudo cambiar el interruptor: ' + (e && e.message ? e.message : 'red'), 'error');
-    });
-  };
-
-  window.wspToggleSimulador = function () {
-    var s = wspEl('wspSimulador');
-    if (!s) return;
-    s.classList.toggle('hidden');
-    s.classList.toggle('flex', !s.classList.contains('hidden'));
-    if (!s.classList.contains('hidden')) setTimeout(function () { wspEl('wspSimTexto').focus(); }, 30);
-  };
-
-  window.wspEnviarSimulado = function () {
-    var jid = String(wspEl('wspSimJid').value || '').trim() || 'SIM-999999999';
-    var nombre = String(wspEl('wspSimNombre').value || '').trim() || 'Cliente Prueba';
-    var texto = String(wspEl('wspSimTexto').value || '').trim();
-    if (!texto) { wspToast('Escriba el texto del mensaje a simular', 'error'); return; }
-    wspRpc('simularMensajeWsp', [{ jid: jid, nombre: nombre, texto: texto }], function (res) {
-      var err = wspRespuestaFallida(res);
-      if (err) { wspToast('❌ ' + err, 'error'); return; }
-      wspEl('wspSimTexto').value = '';
-      wspToast('🧪 Mensaje simulado recibido de ' + nombre, 'sim');
-      WSP.pestana = 'PENDIENTES';
-      wspPintarTabs();
-      wspCargarBandeja(false);
-      wspCargarAlertas(true);
-    }, function (e) {
-      wspToast('❌ Error al simular: ' + (e && e.message ? e.message : 'red'), 'error');
-    });
-  };
-
   // ---------------------------------------------------------------- arranque
   function wspInit() {
-    var tabs = wspEl('wspTabs');
-    if (tabs) tabs.addEventListener('click', function (ev) {
-      var b = ev.target.closest('[data-wsp-tab]');
-      if (!b) return;
-      WSP.pestana = b.getAttribute('data-wsp-tab');
-      wspPintarTabs();
-      wspCargarBandeja(true);
-    });
     var lista = wspEl('wspBandejaLista');
-    if (lista) lista.addEventListener('click', wspClickLista);
-    var sim = wspEl('wspSimulador');
-    if (sim) sim.addEventListener('click', function (ev) {
-      var b = ev.target.closest('[data-wsp-ej]');
-      if (!b) return;
-      wspEl('wspSimTexto').value = b.getAttribute('data-wsp-ej');
-      wspEl('wspSimTexto').focus();
-    });
+    if (lista) {
+      lista.addEventListener('click', function (ev) {
+        var btnHab = ev.target.closest('[data-wsp-consulta-hab]');
+        if (!btnHab) return;
+        wspConsultarFacturacion(ev, btnHab.getAttribute('data-wsp-consulta-hab'));
+      });
+    }
+    var bar = wspEl('wspResumenTurnoBar');
+    if (bar) {
+      bar.addEventListener('click', function (ev) {
+        var btnIr = ev.target.closest('[data-wsp-ir]');
+        if (!btnIr) return;
+        var sec = wspEl(btnIr.getAttribute('data-wsp-ir'));
+        if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
     document.addEventListener('keydown', function (ev) {
-      if (ev.key !== 'Escape' || !wspModalAbierto()) return;
-      if (wspConfirmAbierto()) wspCerrarConfirm(); else cerrarModalWspBandeja();
+      if (ev.key === 'Escape' && wspModalAbierto()) cerrarModalWspBandeja();
     });
     document.addEventListener('visibilitychange', function () {
       if (!document.hidden) wspCargarAlertas(true);
     });
     wspCargarAlertas(true);
     setInterval(wspCargarAlertas, WSP_POLL_MS);
-    setInterval(wspRotar, WSP_ROTAR_MS);
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wspInit);

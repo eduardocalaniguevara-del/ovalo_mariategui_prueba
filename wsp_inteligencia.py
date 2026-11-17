@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Motor de inteligencia de WhatsApp de Recepción (Hotel El Óvalo Mariátegui).
+Motor de Resumen Ejecutivo de WhatsApp de Recepción con Agente IA (100 % Solo Lectura).
+Hotel El Óvalo Mariátegui.
 
-Clasifica los mensajes entrantes (COMPROBANTE / RESERVA / HABITACION / VOUCHER), los cruza con la
-base del hotel (celular + datos del texto) y calcula qué chats siguen "pendientes" de respuesta.
-
-Reglas de seguridad (contrato del plan_wsp_en_vivo.md, Componente B):
-  * En MODO_PRUEBA los mensajes se leen de la base OPERATIVA en SOLO LECTURA (sqlite ``mode=ro``) más los
-    mensajes simulados locales (jid con prefijo ``SIM-``). Si la operativa no está disponible se cae a la
-    base local.
-  * El cruce (estancias, huespedes_padron, sunat_*, panel) usa SIEMPRE la base de esta carpeta y solo SELECT.
-  * Escrituras permitidas SOLO en la base local: ``wsp_alertas_estado``, ``estado_sistema('wsp_auto_adelanto')``,
-    ``wsp_recepcion_mensajes`` (únicamente simulados SIM-) y ``wsp_recepcion_cola_envio``
-    (estado SIMULADO en MODO_PRUEBA; PENDIENTE solo cuando NO es MODO_PRUEBA).
-  * Jamás se escribe en estancias, pagos ni ventas_tienda. Jamás se lanza node en MODO_PRUEBA.
+Arquitectura y Reglas Duras:
+  * Visor 100 % de recepción y síntesis: CERO envíos de mensajes, CERO plantillas rápidas,
+    CERO auto-adelanto y CERO simulador.
+  * En MODO_PRUEBA lee las conversaciones reales de la base OPERATIVA estrictamente en SOLO LECTURA
+    (`sqlite3.connect("file:...?mode=ro", uri=True)` + `PRAGMA query_only=1`). Si la operativa no
+    estuviera disponible, cae en solo lectura a la base local.
+  * Cruza cada conversación (por celular de 9 dígitos, Hab/DNI/RUC/comprobante en texto y nombre)
+    contra `estancias`, `huespedes_padron`, `sunat_ventas` y `sunat_lineas_cache` usando solo SELECT.
+    JAMÁS modifica `estancias`, `pagos`, `ventas_tienda` ni `wsp_recepcion_cola_envio`.
+  * Analiza las conversaciones completas (cliente + respuestas de recepción) con Agente IA
+    (`google.genai`: `gemini-3.8-flash` -> fallback `gemini-2.5-flash` -> fallback contextual local)
+    y guarda el corte en `wsp_resumen_ejecutivo` en los 4 horarios fijos (`08:00`, `13:00`, `19:00`, `23:00`)
+    o bajo demanda con `actualizarResumenWspAhora`.
 """
 
 from __future__ import annotations
@@ -23,11 +25,11 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
 import unicodedata
-import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -37,48 +39,34 @@ import config as _cfg
 from config import MODO_PRUEBA
 from database import get_connection
 
-import sqlite3
-
 # ---------------------------------------------------------------------------
-# Constantes del contrato
+# Constantes
 # ---------------------------------------------------------------------------
+HORARIOS_FIJOS: List[str] = ["08:00", "13:00", "19:00", "23:00"]
 CATEGORIAS = ("COMPROBANTE", "RESERVA", "HABITACION", "VOUCHER")
-_PRIORIDAD = {"VOUCHER": 4, "COMPROBANTE": 3, "RESERVA": 2, "HABITACION": 1}  # desempate
+_PRIORIDAD = {"VOUCHER": 4, "COMPROBANTE": 3, "RESERVA": 2, "HABITACION": 1}
 
 INTERNOS_DEFAULT = {
     "51977129752@s.whatsapp.net": "Eduardo Calani (Admin)",
     "51951535614@s.whatsapp.net": "Eliana (Recepción)",
     "120363410025708860@g.us": "Grupo Ovalo Mariategui",
 }
-INTERNOS_POR_NOMBRE = {"eleiza store"}  # se compara contra el nombre del chat (minúsculas)
+INTERNOS_POR_NOMBRE = {"eleiza store"}
+_CELULAR_RECEPCION_PROPIO = "964139749"
+_JIDS_IGNORADOS_SUFIJOS = ("@broadcast", "@newsletter", "@g.us")
 
 UMBRAL_ROJO_MIN = 5
-AUTO_ADELANTO_MIN = 3
-VENTANA_ALERTAS_H = 48          # chats con actividad en las últimas 48 h
-VENTANA_BANDEJA_DIAS = 7        # pestañas por categoría / interno
-MAX_MENSAJES_TARJETA = 12
-MAX_TARJETAS = 60
-
-PLANTILLAS = {
-    "ADELANTO_RESERVA": "¡Hola! 😊 Gracias por escribir al Hotel El Óvalo Mariátegui. ¿Qué tipo de habitación busca (Simple, Matrimonial, Doble) y para qué fecha y hora aproximada de llegada?",
-    "DISPONIBILIDAD": "",  # se genera con libres_hoy()
-    "COMPROBANTE_DATOS": "Con gusto. ¿Nos confirma su RUC (factura) o DNI (boleta) y el número de habitación?",
-    "COMPROBANTE_EN_PROCESO": "Recibido, en unos minutos le enviamos su comprobante.",
-    "COMPROBANTE_EMITIDO": "Su comprobante ya fue emitido. En un momento se lo reenviamos por este medio.",
-    "HAB_RECIBIDO": "Recibido 👍 enseguida le atendemos.",
-    "VOUCHER_RECIBIDO": "Recibimos su pago 👍 lo registramos enseguida. ¡Gracias!",
-}
+MAX_MENSAJES_CHAT = 30
+MAX_MENSAJES_VISTA = 16
 
 _BASE_DIR = Path(getattr(_cfg, "BASE_APP_DIR", Path(__file__).resolve().parent))
 _DATA_DIR = Path(getattr(_cfg, "DATA_DIR", _BASE_DIR / "data"))
 _PATRONES_PATH = _DATA_DIR / "wsp_patrones_entrenados.json"
 _INTERNOS_PATH = _DATA_DIR / "wsp_contactos_internos.json"
 
-_JIDS_IGNORADOS_SUFIJOS = ("@broadcast", "@newsletter")
-
 
 # ---------------------------------------------------------------------------
-# Utilidades
+# Utilidades básicas
 # ---------------------------------------------------------------------------
 def _ahora() -> float:
     return time.time()
@@ -118,6 +106,8 @@ def _parse_dmy(s: str) -> Optional[date]:
 
 def _hora_txt(ts: int) -> str:
     try:
+        if not ts:
+            return ""
         dt = datetime.fromtimestamp(int(ts))
         if dt.date() == date.today():
             return dt.strftime("%H:%M")
@@ -127,7 +117,6 @@ def _hora_txt(ts: int) -> str:
 
 
 def _celular9(jid: str) -> str:
-    """Últimos 9 dígitos del celular detrás del jid (vacío para grupos/lid)."""
     j = str(jid or "")
     if j.endswith("@g.us") or j.endswith("@lid"):
         return ""
@@ -139,7 +128,44 @@ def _celular9(jid: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Base de datos: tablas locales y fuentes de mensajes
+# Carga de API Key (.env en prueba y operativa)
+# ---------------------------------------------------------------------------
+def _cargar_api_keys_gemini() -> List[str]:
+    keys: List[str] = []
+    for env_var in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        val = os.environ.get(env_var, "").strip()
+        if val and val not in keys:
+            keys.append(val)
+
+    candidatos_env = [
+        _BASE_DIR / ".env",
+        Path(r"C:\ovalo_mariategui_prueba\.env"),
+        Path(r"C:\Recepcion_Ovalo_Local\.env"),
+    ]
+    carpeta_op = str((getattr(_cfg, "PERFIL_HOTEL", {}) or {}).get("carpeta_operativa") or "").strip()
+    if carpeta_op:
+        candidatos_env.append(Path(carpeta_op) / ".env")
+
+    for ruta in candidatos_env:
+        try:
+            if not ruta.exists():
+                continue
+            for linea in ruta.read_text(encoding="utf-8", errors="ignore").splitlines():
+                lin = linea.strip()
+                if not lin or lin.startswith("#") or "=" not in lin:
+                    continue
+                k, v = lin.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k in ("GEMINI_API_KEY", "GOOGLE_API_KEY") and v and v not in keys:
+                    keys.append(v)
+        except Exception:
+            continue
+    return keys
+
+
+# ---------------------------------------------------------------------------
+# Tablas locales (solo wsp_resumen_ejecutivo) y lectura RO de operativa
 # ---------------------------------------------------------------------------
 _tabla_lock = threading.Lock()
 _tabla_lista = False
@@ -155,14 +181,16 @@ def _asegurar_tablas() -> None:
         conn = get_connection()
         try:
             conn.execute(
-                """CREATE TABLE IF NOT EXISTS wsp_alertas_estado (
-                    chat_jid            TEXT PRIMARY KEY,
-                    atendido_hasta_ts   INTEGER DEFAULT 0,
-                    atendido_por        TEXT DEFAULT '',
-                    adelanto_enviado_ts INTEGER DEFAULT 0,
-                    categoria_manual    TEXT DEFAULT '',
-                    actualizado_en      TEXT DEFAULT (datetime('now','localtime'))
+                """CREATE TABLE IF NOT EXISTS wsp_resumen_ejecutivo (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fecha_hora   TEXT NOT NULL,
+                    slot_horario TEXT NOT NULL,
+                    fuente_ia    TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
                 )"""
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wsp_resumen_ejec_fecha ON wsp_resumen_ejecutivo (fecha_hora DESC)"
             )
             conn.commit()
         finally:
@@ -171,13 +199,12 @@ def _asegurar_tablas() -> None:
 
 
 def _ruta_operativa_db() -> Optional[Path]:
-    """Ruta de la base operativa (solo MODO_PRUEBA). None si no aplica o no existe."""
     if not MODO_PRUEBA:
         return None
     try:
-        carpeta = str((getattr(_cfg, "PERFIL_HOTEL", {}) or {}).get("carpeta_operativa") or "").strip()
+        carpeta = str((getattr(_cfg, "PERFIL_HOTEL", {}) or {}).get("carpeta_operativa") or r"C:\Recepcion_Ovalo_Local").strip()
     except Exception:
-        carpeta = ""
+        carpeta = r"C:\Recepcion_Ovalo_Local"
     if not carpeta:
         return None
     try:
@@ -191,13 +218,13 @@ def _ruta_operativa_db() -> Optional[Path]:
 
 
 def _abrir_operativa_ro() -> Optional[sqlite3.Connection]:
-    """Conexión SOLO LECTURA a la base operativa. Cualquier escritura lanza sqlite3.OperationalError."""
+    """Abre la base operativa estrictamente en modo SOLO LECTURA (`mode=ro` + `query_only=1`)."""
     db = _ruta_operativa_db()
     if db is None:
         return None
     try:
         uri = "file:" + quote(db.as_posix(), safe="/:") + "?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=3.0, check_same_thread=False)
+        conn = sqlite3.connect(uri, uri=True, timeout=4.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=3000;")
         conn.execute("PRAGMA query_only=1;")
@@ -206,94 +233,25 @@ def _abrir_operativa_ro() -> Optional[sqlite3.Connection]:
         return None
 
 
-_SQL_MENSAJES = """
-SELECT COALESCE(chat_jid, jid)                         AS chat,
-       COALESCE(id_mensaje, id)                        AS mid,
-       COALESCE(timestamp_unix, timestamp, 0)          AS ts,
-       MAX(COALESCE(es_mio, 0), COALESCE(desde_recepcion, 0)) AS es_mio,
-       COALESCE(tipo_mensaje, tipo, 'texto')           AS tipo,
-       COALESCE(texto, '')                             AS texto,
-       COALESCE(chat_nombre, '')                       AS chat_nombre,
-       COALESCE(nombre_emisor, remitente_nombre, '')   AS emisor,
-       COALESCE(ruta_archivo, archivo_ruta, '')        AS archivo
-  FROM wsp_recepcion_mensajes
- WHERE (timestamp_unix >= ? OR (timestamp_unix IS NULL AND timestamp >= ?))
-   {extra}
- ORDER BY ts ASC
-"""
-
-
-def _consulta_mensajes(conn: sqlite3.Connection, desde_ts: int, solo_sim: bool) -> List[Dict[str, Any]]:
-    extra = "AND COALESCE(chat_jid, jid) LIKE 'SIM-%'" if solo_sim else ""
-    cur = conn.execute(_SQL_MENSAJES.format(extra=extra), (int(desde_ts), int(desde_ts)))
-    return [dict(r) for r in cur.fetchall()]
-
-
-def _leer_mensajes(desde_ts: int) -> List[Dict[str, Any]]:
-    """Mensajes desde ``desde_ts``. Prueba: operativa (ro) + simulados locales; si la operativa falla, base local."""
-    filas: List[Dict[str, Any]] = []
-    op = _abrir_operativa_ro() if MODO_PRUEBA else None
-    local = get_connection()
-    try:
-        if op is not None:
-            try:
-                filas.extend(_consulta_mensajes(op, desde_ts, solo_sim=False))
-                filas.extend(_consulta_mensajes(local, desde_ts, solo_sim=True))
-                filas.sort(key=lambda r: r["ts"])
-                return filas
-            except Exception:
-                filas = []  # operativa no disponible -> cae a local
-        # operativa (get_connection) o respaldo local en la prueba
-        return _consulta_mensajes(local, desde_ts, solo_sim=False)
-    finally:
-        local.close()
-        if op is not None:
-            op.close()
-
-
-def _leer_ocr(ids: List[str]) -> Dict[str, Dict[str, Any]]:
-    """OCR/clasificación de documentos por id_mensaje (wsp_recepcion_documentos). Tolerante a ausencia."""
-    ids = [i for i in ids if i]
-    if not ids:
-        return {}
-    out: Dict[str, Dict[str, Any]] = {}
-    conns: List[sqlite3.Connection] = []
-    op = _abrir_operativa_ro() if MODO_PRUEBA else None
-    if op is not None:
-        conns.append(op)
-    conns.append(get_connection())
-    try:
-        marcas = ",".join("?" for _ in ids)
-        for c in conns:
-            try:
-                cur = c.execute(
-                    f"SELECT COALESCE(id_mensaje, mensaje_id) AS mid, texto_extraido, categoria, monto_detectado "
-                    f"FROM wsp_recepcion_documentos WHERE COALESCE(id_mensaje, mensaje_id) IN ({marcas})",
-                    ids,
-                )
-                for r in cur.fetchall():
-                    out.setdefault(
-                        str(r["mid"]),
-                        {"texto": r["texto_extraido"] or "", "categoria": r["categoria"] or "", "monto": r["monto_detectado"] or ""},
-                    )
-            except Exception:
-                continue
-    finally:
-        for c in conns:
-            try:
-                c.close()
-            except Exception:
-                pass
-    return out
+def _abrir_local_ro() -> sqlite3.Connection:
+    """Abre la base local en solo lectura para consultas de cruce."""
+    db_local = Path(getattr(_cfg, "DB_PATH", _DATA_DIR / "ovalo_sistema.db"))
+    if db_local.exists():
+        uri = "file:" + quote(db_local.as_posix(), safe="/:") + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=3000;")
+        conn.execute("PRAGMA query_only=1;")
+        return conn
+    return get_connection()
 
 
 def _estado_daemon_raw() -> str:
-    """Valor crudo de wsp_recepcion_estado.conexion (operativa en ro durante la prueba)."""
     conns: List[sqlite3.Connection] = []
     op = _abrir_operativa_ro() if MODO_PRUEBA else None
     if op is not None:
         conns.append(op)
-    conns.append(get_connection())
+    conns.append(_abrir_local_ro())
     try:
         for c in conns:
             try:
@@ -301,7 +259,12 @@ def _estado_daemon_raw() -> str:
                 if r and r[0] is not None:
                     return str(r[0])
             except Exception:
-                continue
+                try:
+                    r2 = c.execute("SELECT conexion FROM wsp_recepcion_estado LIMIT 1").fetchone()
+                    if r2 and r2[0] is not None:
+                        return str(r2[0])
+                except Exception:
+                    continue
     finally:
         for c in conns:
             try:
@@ -322,18 +285,8 @@ def estado_daemon() -> str:
     return raw if raw.startswith("DESCONECTADO") else f"DESCONECTADO_{raw}"
 
 
-def _cargar_estado_chats() -> Dict[str, Dict[str, Any]]:
-    _asegurar_tablas()
-    conn = get_connection()
-    try:
-        rows = conn.execute("SELECT * FROM wsp_alertas_estado").fetchall()
-        return {r["chat_jid"]: dict(r) for r in rows}
-    finally:
-        conn.close()
-
-
 # ---------------------------------------------------------------------------
-# Internos
+# Contactos internos
 # ---------------------------------------------------------------------------
 _internos_cache: Dict[str, Any] = {"mtime": -1.0, "jids": dict(INTERNOS_DEFAULT), "nombres": set(INTERNOS_POR_NOMBRE)}
 
@@ -351,21 +304,12 @@ def _cargar_internos() -> Tuple[Dict[str, str], Set[str]]:
         try:
             data = json.loads(_INTERNOS_PATH.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                if "jids" in data or "nombres" in data:
-                    extra_j = data.get("jids") or {}
-                    if isinstance(extra_j, list):
-                        extra_j = {str(j): str(j) for j in extra_j}
+                extra_j = data.get("jids") if ("jids" in data or "nombres" in data) else data
+                if isinstance(extra_j, list):
+                    extra_j = {str(j): str(j) for j in extra_j}
+                if isinstance(extra_j, dict):
                     jids.update({str(k): str(v) for k, v in extra_j.items()})
-                    nombres |= {str(n).strip().lower() for n in (data.get("nombres") or [])}
-                else:
-                    jids.update({str(k): str(v) for k, v in data.items()})
-            elif isinstance(data, list):
-                for it in data:
-                    s = str(it).strip()
-                    if "@" in s or _solo_digitos(s) == s:
-                        jids[s if "@" in s else f"{s}@s.whatsapp.net"] = s
-                    else:
-                        nombres.add(s.lower())
+                nombres |= {str(n).strip().lower() for n in (data.get("nombres") or [])}
         except Exception:
             pass
     _internos_cache.update({"mtime": mt, "jids": jids, "nombres": nombres})
@@ -373,13 +317,18 @@ def _cargar_internos() -> Tuple[Dict[str, str], Set[str]]:
 
 
 def _es_interno(jid: str, nombre: str) -> bool:
-    jids, nombres = _cargar_internos()
-    if jid in jids or jid.endswith("@g.us"):
+    j = str(jid or "").strip()
+    if not j or j.endswith(_JIDS_IGNORADOS_SUFIJOS) or j == "status@broadcast":
         return True
-    c9 = _celular9(jid)
+    c9 = _celular9(j)
+    if c9 == _CELULAR_RECEPCION_PROPIO:
+        return True
+    jids, nombres = _cargar_internos()
+    if j in jids:
+        return True
     if c9:
-        for j in jids:
-            if _celular9(j) == c9:
+        for ji in jids:
+            if _celular9(ji) == c9:
                 return True
     if str(nombre or "").strip().lower() in nombres:
         return True
@@ -387,73 +336,50 @@ def _es_interno(jid: str, nombre: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Patrones del clasificador (diccionario base + data/wsp_patrones_entrenados.json recargable en caliente)
+# Clasificador y extractor de entidades (auxiliares de lectura)
 # ---------------------------------------------------------------------------
 _NORMALIZACIONES_BASE = {
-    "abitacion": "habitacion", "abitasion": "habitacion", "habitasion": "habitacion", "habitaciom": "habitacion",
-    "habitacon": "habitacion", "avitacion": "habitacion", "habitacio": "habitacion", "cuarto": "habitacion",
-    "fatura": "factura", "facutra": "factura", "factuta": "factura", "facctura": "factura", "fctura": "factura",
-    "voleta": "boleta", "boletta": "boleta", "bolta": "boleta", "boelta": "boleta",
-    "matrimoneal": "matrimonial", "matrimonil": "matrimonial", "matri": "matrimonial",
-    "yapee": "yape", "yapie": "yape", "yapeo": "yape", "yapeado": "yape", "yapie": "yape", "yapé": "yape",
-    "pagee": "pague", "paguee": "pague", "individual": "simple", "dobles": "doble",
-    "xfa": "porfa", "porfis": "porfa", "porfavor": "porfa", "pf": "porfa", "pls": "porfa",
+    "abitacion": "habitacion", "abitasion": "habitacion", "habitasion": "habitacion",
+    "habitaciom": "habitacion", "habitacon": "habitacion", "avitacion": "habitacion",
+    "cuarto": "habitacion", "fatura": "factura", "facutra": "factura", "factuta": "factura",
+    "voleta": "boleta", "boletta": "boleta", "matrimoneal": "matrimonial", "matri": "matrimonial",
+    "yapee": "yape", "yapie": "yape", "yapeo": "yape", "yapeado": "yape",
+    "pagee": "pague", "paguee": "pague", "xfa": "porfa", "porfis": "porfa", "porfavor": "porfa",
 }
 
 _PATRONES_BASE: Dict[str, Dict[str, Dict[str, float]]] = {
     "COMPROBANTE": {
-        "palabras": {"factura": 3.0, "boleta": 3.0, "ruc": 2.5, "comprobante": 2.5, "sunat": 2.0, "facturar": 3.0,
-                     "facturacion": 3.0, "boletear": 3.0, "emision": 1.5, "emitir": 1.5, "emitan": 2.0, "emita": 2.0,
-                     "razon": 0.5, "social": 0.5},
-        "frases": {"a la espera de mi factura": 3.0, "a nombre de": 1.5, "mi factura": 2.0, "mi boleta": 2.0,
-                   "necesito factura": 2.0, "necesito boleta": 2.0, "con ruc": 2.0, "razon social": 2.0,
-                   "me emiten": 1.5, "me pueden emitir": 2.0, "me envian mi": 1.5, "constancia de": 0.5},
+        "palabras": {"factura": 3.0, "boleta": 3.0, "ruc": 2.5, "comprobante": 2.5, "sunat": 2.0,
+                     "facturar": 3.0, "boletear": 3.0, "emitir": 1.5, "emitan": 2.0},
+        "frases": {"a la espera de mi factura": 3.5, "mi factura": 2.5, "mi boleta": 2.5,
+                   "necesito factura": 2.5, "con ruc": 2.0, "razon social": 2.0},
     },
     "RESERVA": {
-        "palabras": {"reservar": 3.0, "reserva": 3.0, "reservacion": 3.0, "separar": 3.0, "separen": 3.0, "separa": 2.5,
-                     "disponible": 2.5, "disponibilidad": 3.0, "libre": 1.5, "libres": 1.5, "precio": 2.0,
-                     "tarifa": 2.0, "costo": 2.0, "cuanto": 1.5, "cuesta": 2.0, "habitacion": 1.0, "matrimonial": 2.0,
-                     "simple": 1.5, "doble": 1.5, "triple": 1.5, "tina": 1.5, "tienen": 1.5, "tiene": 1.0,
-                     "hay": 0.8, "alojamiento": 1.5, "hospedaje": 2.0, "hospedar": 2.0, "llegaria": 1.5, "llegamos": 1.0,
-                     "llego": 0.8, "noche": 0.8, "hoy": 0.5, "manana": 0.5, "pasado": 0.3, "personas": 1.0, "adelanto": 1.0},
-        "frases": {"una habitacion de": 2.5, "me das una": 2.0, "tienen habitacion": 3.0, "tiene habitacion": 3.0,
-                   "hay habitacion": 3.0, "hay cuarto": 3.0, "cuanto cuesta": 2.0, "cuanto esta": 1.5, "cuanto sale": 1.5,
-                   "cuanto la noche": 3.0, "tienen disponible": 3.0, "tiene disponible": 3.0, "para hoy": 1.0,
-                   "para manana": 1.0, "para esta noche": 1.5, "quisiera una": 1.5, "quiero una": 1.5,
-                   "necesito una habitacion": 3.0, "busco habitacion": 3.0, "con bano privado": 1.5, "con tina": 1.0},
+        "palabras": {"reservar": 3.0, "reserva": 3.0, "reservacion": 3.0, "separar": 3.0,
+                     "disponible": 2.5, "disponibilidad": 3.0, "precio": 2.0, "tarifa": 2.0,
+                     "costo": 2.0, "cuanto": 1.5, "habitacion": 1.0, "matrimonial": 2.0,
+                     "simple": 1.5, "doble": 1.5, "tina": 1.5, "netflix": 1.2},
+        "frases": {"una habitacion de": 2.5, "tienen habitacion": 3.0, "cuanto cuesta": 2.0,
+                   "cuanto la noche": 3.0, "tienen disponible": 3.0, "para realizar la reserva": 3.5},
     },
     "HABITACION": {
-        "palabras": {"llave": 3.0, "llaves": 3.0, "toalla": 3.0, "toallas": 3.0, "visita": 2.5, "visitas": 2.5,
-                     "visitante": 2.5, "agua": 1.2, "caliente": 1.5, "ducha": 2.0, "tv": 1.5, "televisor": 1.5,
-                     "control": 1.0, "wifi": 2.0, "clave": 1.0, "sabanas": 2.0, "frazada": 2.0, "limpieza": 2.0,
-                     "pasar": 1.5, "pase": 1.5, "baja": 0.8, "bajo": 0.8, "tienda": 1.0, "snack": 1.2, "gaseosa": 1.2,
-                     "ocupado": 1.0, "ruido": 1.5, "jabon": 1.5, "papel": 1.5, "foco": 1.5, "puerta": 1.5, "sale": 0.5,
-                     "salgo": 1.0, "checkout": 1.5, "late": 0.8, "dele": 1.5, "soy": 1.0},
-        "frases": {"dele la llave": 3.0, "le hace pasar": 2.5, "me abren": 2.0, "no hay agua": 3.0, "no funciona": 2.0,
-                   "no prende": 2.0, "me puede subir": 2.0, "soy de la": 1.5, "estoy en la": 1.5, "mi habitacion": 1.5,
-                   "salida tardia": 2.0, "dejo la llave": 2.5, "dejar la llave": 2.5},
+        "palabras": {"llave": 3.0, "llaves": 3.0, "toalla": 3.0, "toallas": 3.0, "visita": 2.5,
+                     "ducha": 2.0, "wifi": 2.0, "limpieza": 2.0, "pasar": 1.5, "dele": 1.5, "soy": 1.0},
+        "frases": {"dele la llave": 3.5, "le hace pasar": 3.0, "no hay agua": 3.0, "va preguntar": 2.5},
     },
     "VOUCHER": {
-        "palabras": {"yape": 3.0, "plin": 3.0, "transferencia": 3.0, "transferi": 3.0, "deposito": 2.5, "deposite": 2.5,
-                     "voucher": 3.0, "pague": 2.5, "pago": 1.5, "pagado": 2.0, "abone": 2.5, "abono": 2.0,
-                     "constancia": 1.5, "operacion": 2.0, "captura": 1.5, "adjunto": 1.0, "cancele": 2.5, "cancelado": 1.5,
-                     "bcp": 1.5, "interbank": 1.5, "bbva": 1.5, "scotiabank": 1.5, "cuenta": 0.8, "cci": 1.5},
-        "frases": {"ya pague": 3.0, "ya te pague": 3.0, "te yape": 3.0, "te yapeo": 3.0, "le yape": 3.0,
-                   "le yapeo": 3.0, "numero de operacion": 3.0, "nro de operacion": 3.0, "comprobante de pago": 1.5,
-                   "pago realizado": 3.0, "constancia de pago": 3.0, "ya hice el pago": 3.0, "ya hice el deposito": 3.0,
-                   "yapeaste": 3.0, "yapeo exitoso": 3.0, "te envio el pago": 2.5, "aqui esta el pago": 2.5},
+        "palabras": {"yape": 3.0, "plin": 3.0, "transferencia": 3.0, "deposito": 2.5, "voucher": 3.0,
+                     "pague": 2.5, "pagado": 2.0, "abono": 2.0, "constancia": 2.0, "operacion": 2.0},
+        "frases": {"ya pague": 3.0, "te yapeo": 3.0, "numero de operacion": 3.0, "constancia de pago": 3.0},
     },
 }
 
-# Vocabulario cuyo mensaje (si TODAS sus palabras están aquí) se considera ruido
 _RUIDO_PALABRAS_BASE = {
-    "ok", "okey", "oki", "okay", "oka", "gracias", "graciass", "grasias", "muchas", "muchisimas", "mil", "listo", "lista",
-    "vale", "dale", "bueno", "buena", "buenas", "buenos", "buen", "dia", "dias", "tarde", "tardes", "noche", "noches",
-    "hola", "holaa", "holi", "saludos", "senorita", "senor", "senora", "joven", "porfa", "favor", "por", "ya", "entendido",
-    "perfecto", "excelente", "genial", "igual", "de", "nada", "todos", "modos", "modo", "claro", "no", "jaja", "jajaja",
-    "jeje", "amen", "bendiciones", "cuidese", "hasta", "luego", "adios", "chau", "chao", "un", "abrazo", "gracia", "dios",
-    "le", "lo", "la", "te", "se", "que", "esta", "esta", "bien", "super", "mucho", "estimado", "estimada", "disculpe",
-    "disculpa", "perdon", "y", "a", "el", "en", "con", "su", "mi",
+    "ok", "okey", "oki", "okay", "oka", "gracias", "graciass", "grasias", "muchas", "mil", "listo", "lista",
+    "vale", "dale", "bueno", "buena", "buenas", "buenos", "buen", "dia", "dias", "tarde", "tardes", "noche",
+    "noches", "hola", "saludos", "senorita", "senor", "joven", "porfa", "favor", "por", "ya", "entendido",
+    "conforme", "perfecto", "excelente", "igual", "de", "nada", "todos", "modos", "claro", "no", "si", "yap",
+    "esta", "bien", "ustedes", "a", "y", "el", "la", "en",
 }
 _RUIDO_EXACTOS_BASE = {"[sticker]", "[reaccion]", "[reaction]", "[emoji]", "[gif]", "👍", "🙏", "👌", "ok", "gracias"}
 _TIPOS_RUIDO = {"sticker", "reaccion", "reaction", "protocol", "protocolo", "gif", "system", "sistema", "call", "llamada"}
@@ -462,40 +388,6 @@ _TIPOS_ADJUNTO = {"imagen", "image", "documento", "document", "pdf", "foto", "ar
 _patrones_lock = threading.Lock()
 _patrones: Dict[str, Any] = {}
 _patrones_mtime: float = -1.0
-
-
-def _fusionar_patrones() -> Dict[str, Any]:
-    """Base embebida + archivo entrenado (el archivo agrega/pisa llaves)."""
-    pal = {c: dict(_PATRONES_BASE[c]["palabras"]) for c in CATEGORIAS}
-    fra = {c: dict(_PATRONES_BASE[c]["frases"]) for c in CATEGORIAS}
-    norm = dict(_NORMALIZACIONES_BASE)
-    exactos = set(_RUIDO_EXACTOS_BASE)
-    ruido_pal = set(_RUIDO_PALABRAS_BASE)
-    cargado = False
-    try:
-        data = json.loads(_PATRONES_PATH.read_text(encoding="utf-8"))
-        cargado = True
-        for k, v in (data.get("normalizaciones") or {}).items():
-            norm[_sin_tildes(str(k)).lower()] = _sin_tildes(str(v)).lower()
-        cats = data.get("categorias") or {}
-        for c in CATEGORIAS:
-            ent = cats.get(c) or {}
-            for p, w in (ent.get("palabras") or {}).items():
-                try:
-                    pal[c][_sin_tildes(str(p)).lower()] = float(w)
-                except (TypeError, ValueError):
-                    pass
-            for f, w in (ent.get("frases") or {}).items():
-                try:
-                    fra[c][_sin_tildes(str(f)).lower()] = float(w)
-                except (TypeError, ValueError):
-                    pass
-        rz = cats.get("RUIDO") or {}
-        for e in rz.get("exactos") or []:
-            exactos.add(str(e).strip().lower())
-    except (OSError, ValueError, AttributeError):
-        pass
-    return {"pal": pal, "fra": fra, "norm": norm, "exactos": exactos, "ruido_pal": ruido_pal, "archivo": cargado}
 
 
 def _get_patrones() -> Dict[str, Any]:
@@ -507,22 +399,38 @@ def _get_patrones() -> Dict[str, Any]:
     if _patrones and mt == _patrones_mtime:
         return _patrones
     with _patrones_lock:
-        if not _patrones or mt != _patrones_mtime:
-            _patrones = _fusionar_patrones()
-            _patrones_mtime = mt
+        pal = {c: dict(_PATRONES_BASE[c]["palabras"]) for c in CATEGORIAS}
+        fra = {c: dict(_PATRONES_BASE[c]["frases"]) for c in CATEGORIAS}
+        norm = dict(_NORMALIZACIONES_BASE)
+        exactos = set(_RUIDO_EXACTOS_BASE)
+        try:
+            if mt:
+                data = json.loads(_PATRONES_PATH.read_text(encoding="utf-8"))
+                for k, v in (data.get("normalizaciones") or {}).items():
+                    norm[_sin_tildes(str(k)).lower()] = _sin_tildes(str(v)).lower()
+                cats = data.get("categorias") or {}
+                for c in CATEGORIAS:
+                    ent = cats.get(c) or {}
+                    for p, w in (ent.get("palabras") or {}).items():
+                        pal[c][_sin_tildes(str(p)).lower()] = float(w)
+                    for f, w in (ent.get("frases") or {}).items():
+                        fra[c][_sin_tildes(str(f)).lower()] = float(w)
+                for e in ((cats.get("RUIDO") or {}).get("exactos") or []):
+                    exactos.add(str(e).strip().lower())
+        except Exception:
+            pass
+        _patrones = {"pal": pal, "fra": fra, "norm": norm, "exactos": exactos, "ruido_pal": set(_RUIDO_PALABRAS_BASE)}
+        _patrones_mtime = mt
     return _patrones
 
 
-# ---------------------------------------------------------------------------
-# Habitaciones válidas
-# ---------------------------------------------------------------------------
 _habs_cache: Dict[str, Any] = {"ts": 0.0, "set": set()}
 
 
 def _habs_validas() -> Set[str]:
     if _ahora() - _habs_cache["ts"] < 300 and _habs_cache["set"]:
         return _habs_cache["set"]
-    conn = get_connection()
+    conn = _abrir_local_ro()
     try:
         rows = conn.execute("SELECT DISTINCT TRIM(hab) FROM estancias WHERE TRIM(COALESCE(hab,''))<>''").fetchall()
         vals = {str(r[0]).strip().lower() for r in rows if len(str(r[0]).strip()) >= 2}
@@ -534,9 +442,6 @@ def _habs_validas() -> Set[str]:
     return vals
 
 
-# ---------------------------------------------------------------------------
-# Clasificación
-# ---------------------------------------------------------------------------
 def _normalizar(texto: str) -> Tuple[str, List[str]]:
     p = _get_patrones()
     t = _sin_tildes(str(texto or "")).lower()
@@ -545,18 +450,7 @@ def _normalizar(texto: str) -> Tuple[str, List[str]]:
     return " ".join(toks), toks
 
 
-def _tokenset(toks: List[str]) -> Set[str]:
-    s = set(toks)
-    for t in toks:  # singular tosco: llaves->llave, facturas->factura
-        if len(t) > 4 and t.endswith("s"):
-            s.add(t[:-1])
-        if len(t) > 5 and t.endswith("es"):
-            s.add(t[:-2])
-    return s
-
-
 def es_ruido_mensaje(texto: str, tipo_msg: str = "texto") -> bool:
-    """True si el mensaje (individual) no requiere atención: ok/gracias/saludo suelto/sticker/vacío."""
     tipo = str(tipo_msg or "texto").lower()
     if tipo in _TIPOS_RUIDO:
         return True
@@ -567,37 +461,40 @@ def es_ruido_mensaje(texto: str, tipo_msg: str = "texto") -> bool:
     if crudo in p["exactos"]:
         return True
     norm, toks = _normalizar(texto)
-    if not toks:
-        return True  # solo emojis/puntuación
-    if norm in p["exactos"]:
+    if not toks or norm in p["exactos"]:
         return True
     return all(t in p["ruido_pal"] for t in toks)
 
 
 _RE_RUC = re.compile(r"(?<!\d)((?:10|15|17|20)\d{9})(?!\d)")
 _RE_DNI = re.compile(r"(?<!\d)(\d{8})(?!\d)")
-_RE_MONTO = re.compile(r"(?:s\s*/\s*\.?\s*|soles?\s*)(\d{1,4}(?:[.,]\d{1,2})?)|(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:soles|sol)\b", re.I)
-_TIPOS_HAB = (
-    ("tina", "tina"), ("matrimonial", "matrimonial"), ("triple", "triple"), ("doble", "doble"), ("simple", "simple"),
+_RE_CPE = re.compile(r"(?<![A-Za-z0-9])((?:E001|EB01|F\d{3}|B\d{3})-\d{1,8})(?![A-Za-z0-9])", re.I)
+_RE_MONTO = re.compile(
+    r"(?:s\s*/\s*\.?\s*|soles?\s*)(\d{1,4}(?:[.,]\d{1,2})?)|(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:soles|sol)\b",
+    re.I,
 )
 
 
 def extraer_entidades(texto: str, habs_validas: Optional[Set[str]] = None) -> Dict[str, Any]:
-    """Entidades del texto: habs (solo válidas), dni, ruc, montos, precio_ref, tipo_hab, fecha_ref, nombre."""
     habs_validas = habs_validas if habs_validas is not None else _habs_validas()
     crudo = str(texto or "")
-    ent: Dict[str, Any] = {"habs": [], "dni": None, "ruc": None, "montos": [], "precio_ref": None,
-                           "tipo_hab": None, "fecha_ref": None, "nombre": None}
+    ent: Dict[str, Any] = {
+        "habs": [], "dni": None, "ruc": None, "cpe": None, "montos": [],
+        "precio_ref": None, "tipo_hab": None, "fecha_ref": None, "nombre": None,
+    }
     work = crudo
-
-    m = _RE_RUC.search(work)
-    if m:
-        ent["ruc"] = m.group(1)
-        work = work.replace(m.group(1), " ")
-    m = _RE_DNI.search(work)
-    if m:
-        ent["dni"] = m.group(1)
-        work = work.replace(m.group(1), " ")
+    mc = _RE_CPE.search(work)
+    if mc:
+        ent["cpe"] = mc.group(1).upper()
+    # Quitar telefonos de 9 digitos (ej. 964139749) para no confundir con DNI
+    work_docs = re.sub(r"(?<!\d)9\d{8}(?!\d)", " ", work)
+    mr = _RE_RUC.search(work_docs)
+    if mr:
+        ent["ruc"] = mr.group(1)
+        work_docs = work_docs.replace(mr.group(1), " ")
+    md = _RE_DNI.search(work_docs)
+    if md:
+        ent["dni"] = md.group(1)
 
     for m in _RE_MONTO.finditer(work):
         raw = (m.group(1) or m.group(2) or "").replace(",", ".")
@@ -605,54 +502,29 @@ def extraer_entidades(texto: str, habs_validas: Optional[Set[str]] = None) -> Di
             ent["montos"].append(float(raw))
         except ValueError:
             pass
-    sin_montos = _RE_MONTO.sub(" ", work)
-
+    sin_montos = _RE_MONTO.sub(" ", work_docs)
     norm, toks = _normalizar(sin_montos)
     vistos: List[str] = []
     for t in toks:
         if t in habs_validas and t not in vistos:
             vistos.append(t)
+    # Detectar HAB_407 en nombres de PDF
+    for mhab in re.finditer(r"hab[_\s-]*(\d{3})", _sin_tildes(crudo).lower()):
+        hv = mhab.group(1)
+        if hv in habs_validas and hv not in vistos:
+            vistos.append(hv)
     ent["habs"] = vistos
 
-    # precio de referencia: "habitación de 50", "a 60", o el primer monto con S/
-    pr = None
-    for m in re.finditer(r"\b(?:de|a|hasta|en|por|x)\s+(\d{2,3})\b", norm):
-        v = m.group(1)
-        if v not in habs_validas:
-            pr = float(v)
-            break
-    if pr is None and ent["montos"]:
-        pr = ent["montos"][0]
-    ent["precio_ref"] = pr
-
-    for clave, valor in _TIPOS_HAB:
+    for clave in ("tina", "matrimonial", "triple", "doble", "simple"):
         if re.search(rf"\b{clave}\b", norm):
-            ent["tipo_hab"] = valor
+            ent["tipo_hab"] = clave
             break
-
-    if re.search(r"\b(pasado manana)\b", norm):
-        ent["fecha_ref"] = "pasado mañana"
-    elif re.search(r"\b(hoy|esta noche|ahorita|ahora)\b", norm):
-        ent["fecha_ref"] = "hoy"
-    elif re.search(r"\bmanana\b", norm):
-        ent["fecha_ref"] = "mañana"
-    else:
-        md = re.search(r"\b(\d{1,2})[/-](\d{1,2})\b", crudo)
-        if md:
-            ent["fecha_ref"] = f"{int(md.group(1)):02d}/{int(md.group(2)):02d}"
-
-    mn = re.search(
-        r"(?:a nombre de|me llamo|mi nombre es|soy)\s+([A-Za-zÁÉÍÓÚáéíóúÑñ]+(?:\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]+){0,3})",
-        crudo, re.I)
-    if mn:
-        cand = re.split(r"\b(?:y|de la|de|con|para|habitacion|hab|ruc|dni)\b", mn.group(1), flags=re.I)[0].strip()
-        if cand and len(cand) >= 3 and _sin_tildes(cand).lower() not in ("la", "el", "yo"):
-            ent["nombre"] = cand.title()
+    if ent["montos"]:
+        ent["precio_ref"] = ent["montos"][0]
     return ent
 
 
 def clasificar(texto: str, tipo_msg: str = "texto", ocr: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """-> {"categoria": str|None, "confianza": float, "es_ruido": bool, "motivos": [str]}"""
     p = _get_patrones()
     tipo = str(tipo_msg or "texto").lower()
     texto = str(texto or "")
@@ -660,11 +532,10 @@ def clasificar(texto: str, tipo_msg: str = "texto", ocr: Optional[Dict[str, Any]
         return {"categoria": None, "confianza": 0.0, "es_ruido": True, "motivos": ["RUIDO"], "puntaje": 0.0}
     habs = _habs_validas()
     norm, toks = _normalizar(texto)
-    tset = _tokenset(toks)
+    tset = set(toks) | {t[:-1] for t in toks if len(t) > 4 and t.endswith("s")}
     padded = f" {norm} "
     sc = {c: 0.0 for c in CATEGORIAS}
     motivos: List[str] = []
-
     for c in CATEGORIAS:
         for pal, w in p["pal"][c].items():
             if pal in tset:
@@ -674,324 +545,323 @@ def clasificar(texto: str, tipo_msg: str = "texto", ocr: Optional[Dict[str, Any]
             if f" {fr} " in padded:
                 sc[c] += w
                 motivos.append(f"{c}:'{fr}'")
-
     ent = extraer_entidades(texto, habs)
     if ent["habs"]:
         sc["HABITACION"] += 2.5
-        motivos.append("HABITACION:hab_valida=" + ",".join(ent["habs"]))
-    if ent["ruc"]:
+    if ent["ruc"] or ent["cpe"]:
         sc["COMPROBANTE"] += 2.5
-        motivos.append("COMPROBANTE:ruc")
-    elif ent["dni"]:
-        sc["COMPROBANTE"] += 1.0
-        motivos.append("COMPROBANTE:dni")
-    if ent["tipo_hab"]:
-        sc["RESERVA"] += 1.0
-        motivos.append(f"RESERVA:tipo={ent['tipo_hab']}")
-
-    es_adjunto = tipo in _TIPOS_ADJUNTO
-    if es_adjunto:
+    if tipo in _TIPOS_ADJUNTO:
         sc["VOUCHER"] += 2.5
-        motivos.append("VOUCHER:imagen")
-    if ocr:
-        otxt = _sin_tildes(str(ocr.get("texto") or "")).lower()
-        if re.search(r"\b(yape|plin|transferencia|operacion|constancia|deposito|voucher|bcp|interbank|bbva)\b", otxt):
-            sc["VOUCHER"] += 4.0
-            motivos.append("VOUCHER:ocr_bancario")
-        elif re.search(r"\b(factura|boleta|ruc)\b", otxt):
-            sc["COMPROBANTE"] += 2.0
-            motivos.append("COMPROBANTE:ocr")
-        if str(ocr.get("monto") or "").strip():
-            sc["VOUCHER"] += 1.0
-
     orden = sorted(CATEGORIAS, key=lambda c: (sc[c], _PRIORIDAD[c]), reverse=True)
-    mejor, segundo = orden[0], orden[1]
+    mejor = orden[0]
     if sc[mejor] < 1.0:
-        return {"categoria": None, "confianza": 0.0, "es_ruido": es_ruido_mensaje(texto, tipo), "motivos": motivos,
-                "puntaje": 0.0}
-    total = sum(sc.values())
+        return {"categoria": None, "confianza": 0.0, "es_ruido": False, "motivos": motivos, "puntaje": 0.0}
+    total = sum(sc.values()) or 1.0
     conf = round(min(0.99, (sc[mejor] / total) * min(1.0, sc[mejor] / 4.0)), 2)
-    return {"categoria": mejor, "confianza": conf, "es_ruido": False, "motivos": motivos[:12],
-            "puntaje": round(sc[mejor], 2)}
+    return {"categoria": mejor, "confianza": conf, "es_ruido": False, "motivos": motivos[:10], "puntaje": round(sc[mejor], 2)}
 
 
 # ---------------------------------------------------------------------------
-# Cruce con la base del hotel (solo SELECT, base de esta carpeta)
+# Cruce en solo lectura con estancias, padrón y SUNAT
 # ---------------------------------------------------------------------------
-_EST_COLS = ("estancia_uuid, hab, huesped, dni, ruc, empresa, celular, fecha_in_dmy, fecha_out_dmy, ymd_in, ymd_out, "
-             "noches, tarifa, tipo_hab, estado_estancia, adic_snacks, adic_servicios, adic_comp, pago_ini_efec, "
-             "pago_ini_yape, pago_post_efec, pago_post_yape, pago_visa, deuda_anterior, solicita_comp, tipo_comp, "
-             "estado_comp, nro_comp, monto_factura, observaciones")
+_EST_COLS = (
+    "estancia_uuid, hab, huesped, dni, ruc, empresa, celular, fecha_in_dmy, fecha_out_dmy, ymd_in, ymd_out, "
+    "noches, tarifa, tipo_hab, estado_estancia, adic_snacks, adic_servicios, adic_comp, pago_ini_efec, "
+    "pago_ini_yape, pago_post_efec, pago_post_yape, pago_visa, deuda_anterior, solicita_comp, tipo_comp, "
+    "estado_comp, nro_comp, monto_factura, observaciones"
+)
+_SQL_CEL = "REPLACE(REPLACE(REPLACE(REPLACE(COALESCE({c},''),' ',''),'-',''),'+',''),'.','')"
 
 
 def _estancia_dict(r: sqlite3.Row) -> Dict[str, Any]:
     noches = max(1, int(r["noches"] or 1))
     tarifa = _num(r["tarifa"])
     adic = _num(r["adic_snacks"]) + _num(r["adic_servicios"]) + _num(r["adic_comp"])
-    pagado = round(_num(r["pago_ini_efec"]) + _num(r["pago_post_efec"]) + _num(r["pago_ini_yape"])
-                   + _num(r["pago_post_yape"]) + _num(r["pago_visa"]), 2)
+    pagado = round(
+        _num(r["pago_ini_efec"]) + _num(r["pago_post_efec"]) + _num(r["pago_ini_yape"])
+        + _num(r["pago_post_yape"]) + _num(r["pago_visa"]),
+        2,
+    )
     total = round(noches * tarifa + adic + _num(r["deuda_anterior"]), 2)
     return {
-        "uuid": r["estancia_uuid"], "hab": str(r["hab"] or "").strip(), "huesped": r["huesped"] or "",
-        "dni": r["dni"] or "", "ruc": r["ruc"] or "", "empresa": r["empresa"] or "", "celular": r["celular"] or "",
-        "check_in": r["fecha_in_dmy"] or "", "check_out": r["fecha_out_dmy"] or "", "noches": noches,
-        "tarifa": tarifa, "tipo_hab": r["tipo_hab"] or "", "estado_estancia": r["estado_estancia"] or "",
-        "adic_comp": _num(r["adic_comp"]), "total": total, "pagado": pagado, "saldo": round(total - pagado, 2),
-        "solicita_comp": r["solicita_comp"] or "", "tipo_comp": r["tipo_comp"] or "",
-        "estado_comp": r["estado_comp"] or "", "nro_comp": r["nro_comp"] or "",
+        "uuid": r["estancia_uuid"],
+        "hab": str(r["hab"] or "").strip(),
+        "huesped": str(r["huesped"] or "").strip(),
+        "dni": str(r["dni"] or "").strip(),
+        "ruc": str(r["ruc"] or "").strip(),
+        "empresa": str(r["empresa"] or "").strip(),
+        "celular": str(r["celular"] or "").strip(),
+        "check_in": str(r["fecha_in_dmy"] or "").strip(),
+        "check_out": str(r["fecha_out_dmy"] or "").strip(),
+        "ymd_in": int(r["ymd_in"] or 0),
+        "noches": noches,
+        "tarifa": tarifa,
+        "tipo_hab": str(r["tipo_hab"] or "").strip(),
+        "estado_estancia": str(r["estado_estancia"] or "").strip(),
+        "adic_comp": _num(r["adic_comp"]),
+        "total": total,
+        "pagado": pagado,
+        "saldo": round(total - pagado, 2),
+        "solicita_comp": str(r["solicita_comp"] or "").strip(),
+        "tipo_comp": str(r["tipo_comp"] or "").strip(),
+        "estado_comp": str(r["estado_comp"] or "").strip(),
+        "nro_comp": str(r["nro_comp"] or "").strip(),
         "monto_factura": _num(r["monto_factura"]),
     }
 
 
-def _mejor_estancia(rows: List[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+def _mejor_estancia(rows: List[sqlite3.Row], ref_ymd: Optional[int] = None) -> Optional[Dict[str, Any]]:
     if not rows:
         return None
-    rows = sorted(rows, key=lambda r: (str(r["estado_estancia"] or "").lower().startswith("en curso"),
-                                       int(r["ymd_in"] or 0)), reverse=True)
+    if ref_ymd:
+        rows = sorted(
+            rows,
+            key=lambda r: (
+                abs(int(r["ymd_in"] or 0) - ref_ymd) <= 2,
+                str(r["estado_estancia"] or "").lower().startswith("en curso"),
+                int(r["ymd_in"] or 0),
+            ),
+            reverse=True,
+        )
+    else:
+        rows = sorted(
+            rows,
+            key=lambda r: (
+                str(r["estado_estancia"] or "").lower().startswith("en curso"),
+                int(r["ymd_in"] or 0),
+            ),
+            reverse=True,
+        )
     return _estancia_dict(rows[0])
 
 
-_SQL_CEL = "REPLACE(REPLACE(REPLACE(REPLACE(COALESCE({c},''),' ',''),'-',''),'+',''),'.','')"
-
-
-def _estancia_por(conn: sqlite3.Connection, where: str, params: Tuple, min_ymd: int) -> Optional[Dict[str, Any]]:
+def _estancia_por(
+    conn: sqlite3.Connection,
+    where: str,
+    params: Tuple[Any, ...],
+    min_ymd: int,
+    ref_ymd: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
     rows = conn.execute(
-        f"SELECT {_EST_COLS} FROM estancias WHERE {where} "
-        f"AND COALESCE(NULLIF(ymd_out,0), ymd_in, 0) >= ? AND LOWER(COALESCE(estado_estancia,'')) NOT LIKE 'cancel%' "
-        f"ORDER BY ymd_in DESC LIMIT 12",
+        f"SELECT {_EST_COLS} FROM estancias WHERE ({where}) "
+        f"AND COALESCE(NULLIF(ymd_out,0), ymd_in, 0) >= ? "
+        f"AND LOWER(COALESCE(estado_estancia,'')) NOT LIKE 'cancel%' "
+        f"ORDER BY ymd_in DESC LIMIT 15",
         params + (min_ymd,),
     ).fetchall()
-    return _mejor_estancia(rows)
+    return _mejor_estancia(rows, ref_ymd=ref_ymd)
 
 
-def _comprobante_info(conn: sqlite3.Connection, est: Dict[str, Any]) -> Dict[str, Any]:
-    nro = str(est.get("nro_comp") or "").strip()
+def _estado_sunat_texto(conn: sqlite3.Connection, est: Dict[str, Any], cpe_texto: Optional[str] = None) -> Tuple[str, bool]:
+    nro = str(est.get("nro_comp") or cpe_texto or "").strip()
     estado = str(est.get("estado_comp") or "").strip()
-    sunat: List[Dict[str, Any]] = []
+    tipo = str(est.get("tipo_comp") or "").strip()
+    sunat_nro = ""
     try:
         if nro:
-            for r in conn.execute(
-                "SELECT nro_cp, estado, total, fecha_emision FROM sunat_ventas WHERE nro_cp=? LIMIT 3", (nro,)):
-                sunat.append({"nro_cp": r["nro_cp"], "estado": r["estado"], "total": _num(r["total"]),
-                              "fecha_emision": r["fecha_emision"]})
-        d_in = _parse_dmy(est.get("check_in"))
-        if d_in and est.get("hab"):
-            noches = [(d_in + timedelta(days=i)).strftime("%d/%m/%Y") for i in range(max(1, int(est.get("noches") or 1)))]
-            marcas = ",".join("?" for _ in noches)
-            for r in conn.execute(
-                f"SELECT nro_cp, estado, monto_linea, noche_dmy FROM sunat_lineas_cache "
-                f"WHERE TRIM(hab)=? AND noche_dmy IN ({marcas}) AND UPPER(COALESCE(estado,''))='VIGENTE' LIMIT 8",
-                (est["hab"], *noches)):
-                if not any(s["nro_cp"] == r["nro_cp"] for s in sunat):
-                    sunat.append({"nro_cp": r["nro_cp"], "estado": r["estado"], "total": _num(r["monto_linea"]),
-                                  "noche": r["noche_dmy"]})
+            r = conn.execute(
+                "SELECT nro_cp, estado, total FROM sunat_ventas WHERE UPPER(nro_cp)=UPPER(?) LIMIT 1",
+                (nro,),
+            ).fetchone()
+            if r:
+                sunat_nro = f"{r['nro_cp']} ({r['estado']})"
+        if not sunat_nro and est.get("hab"):
+            d_in = _parse_dmy(est.get("check_in", ""))
+            if d_in:
+                noches = [(d_in + timedelta(days=i)).strftime("%d/%m/%Y") for i in range(max(1, int(est.get("noches") or 1)))]
+                marcas = ",".join("?" for _ in noches)
+                r2 = conn.execute(
+                    f"SELECT nro_cp, estado FROM sunat_lineas_cache WHERE TRIM(hab)=? AND noche_dmy IN ({marcas}) "
+                    f"AND UPPER(COALESCE(estado,''))='VIGENTE' LIMIT 1",
+                    (est["hab"], *noches),
+                ).fetchone()
+                if r2:
+                    sunat_nro = f"{r2['nro_cp']} (VIGENTE)"
     except Exception:
         pass
-    emitido = bool(nro and estado.lower().startswith("emitido")) or any(
-        str(s.get("estado") or "").upper() == "VIGENTE" for s in sunat)
-    nro_final = nro or (sunat[0]["nro_cp"] if sunat else "")
-    return {"emitido": emitido, "nro": nro_final, "tipo": est.get("tipo_comp") or "", "estado": estado,
-            "solicitado": est.get("solicita_comp") or "", "sunat": sunat}
+
+    if sunat_nro:
+        return f"Emitido {sunat_nro}", True
+    if nro and (estado.lower().startswith("emitido") or "-" in nro):
+        return f"Emitido ({nro})", True
+    if estado.lower() == "pendiente" or tipo.lower() in ("factura", "boleta"):
+        etiqueta = tipo.capitalize() if tipo and tipo.lower() not in ("ninguno", "n") else "Comprobante"
+        return f"Pendiente {etiqueta}", False
+    return "Sin comprobante solicitado", False
 
 
-def auditar_comprobante(estancia: Dict[str, Any], monto_solicitado_dia: Optional[float] = None,
-                        comprobante: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Regla del 25 % (versión SQLite de auditar_solicitud_wsp.py, sin gspread)."""
-    obs: List[str] = []
-    noches = max(1, int(estancia.get("noches") or 1))
-    tarifa = _num(estancia.get("tarifa"))
-    adic = _num(estancia.get("adic_comp"))
-    saldo = _num(estancia.get("saldo"))
-    ya = (comprobante or {}).get("nro") if (comprobante or {}).get("emitido") else None
-    diferencia = req25 = falta = 0.0
-    if monto_solicitado_dia and monto_solicitado_dia > tarifa:
-        diferencia = round(max(0.0, monto_solicitado_dia * noches - tarifa * noches), 2)
-        req25 = round(0.25 * diferencia, 2)
+def _observacion_25_texto(est: Dict[str, Any], monto_solicitado_dia: Optional[float] = None) -> str:
+    noches = max(1, int(est.get("noches") or 1))
+    tarifa = _num(est.get("tarifa"))
+    adic = _num(est.get("adic_comp"))
+    monto_fact = _num(est.get("monto_factura"))
+    ref_dia = monto_solicitado_dia or (round(monto_fact / noches, 2) if monto_fact > tarifa * noches else 0.0)
+    if ref_dia and ref_dia > tarifa:
+        dif = round((ref_dia - tarifa) * noches, 2)
+        req25 = round(0.25 * dif, 2)
         falta = round(max(0.0, req25 - adic), 2)
-        obs.append(f"Pide S/ {monto_solicitado_dia:.2f}/noche y la tarifa es S/ {tarifa:.2f}: diferencia S/ {diferencia:.2f}, "
-                   f"25 % = S/ {req25:.2f}.")
-        obs.append("Adicional por comprobante OK." if falta <= 0 else
-                   f"Falta cobrar S/ {falta:.2f} de adicional (registrado S/ {adic:.2f}).")
-    if saldo > 0.009:
-        obs.append(f"Saldo pendiente S/ {saldo:.2f}: cobrar antes de emitir.")
-    if ya:
-        obs.append(f"Ya emitido {ya}.")
-    if not obs:
-        obs.append("Sin observaciones: puede emitirse.")
-    return {"ya_emitido": ya, "falta_adicional": falta, "saldo": saldo, "observaciones": obs,
-            "monto_solicitado_dia": monto_solicitado_dia, "diferencia": diferencia, "req_25": req25,
-            "adic_registrado": adic, "listo_para_emitir": (not ya) and falta <= 0 and saldo <= 0.009}
+        if falta > 0.01:
+            return f"Regla 25 %: pide S/ {ref_dia:.0f}/día vs tarifa S/ {tarifa:.0f} → falta cobrar S/ {falta:.2f} de adicional."
+        return f"Regla 25 % conforme (adicional S/ {adic:.2f} cubierto)."
+    if est.get("saldo", 0.0) > 0.01:
+        return f"Saldo de estancia pendiente: S/ {est['saldo']:.2f}."
+    return "Tarifa regular sin recargo 25 % pendiente."
 
 
-def cruzar(jid: str, entidades: Dict[str, Any], categoria: Optional[str] = None) -> Dict[str, Any]:
-    """Vía 1 (celular) y vía 2 (texto: hab/dni/ruc/nombre) contra estancias activas o de los últimos 7 días."""
-    ent = entidades or {}
-    min_ymd = _ymd_hoy(-7)
+def cruzar_conversacion(
+    jid: str,
+    nombre_chat: str,
+    texto_completo: str,
+    ultimo_ts: int,
+) -> Dict[str, Any]:
+    """Cruza una conversación con estancias, padrón y SUNAT en modo 100 % lectura."""
+    habs_val = _habs_validas()
+    ent = extraer_entidades(texto_completo, habs_val)
     cel9 = _celular9(jid)
-    est_cel = est_txt = None
-    huesped = None
-    coincidencias: List[str] = []
-    conn = get_connection()
+    ref_ymd = None
+    if ultimo_ts:
+        try:
+            ref_ymd = int(datetime.fromtimestamp(int(ultimo_ts)).strftime("%Y%m%d"))
+        except Exception:
+            ref_ymd = None
+    min_ymd = min(_ymd_hoy(-30), (ref_ymd - 15) if ref_ymd else _ymd_hoy(-30))
+
+    conn = _abrir_local_ro()
     try:
+        est_cel = None
+        est_txt = None
+        huesped_pad = None
+
         if cel9:
-            col_e = _SQL_CEL.format(c="celular")
-            est_cel = _estancia_por(conn, f"{col_e} LIKE ?", ("%" + cel9,), min_ymd)
-            col_p = _SQL_CEL.format(c="celular")
+            col_c = _SQL_CEL.format(c="celular")
+            est_cel = _estancia_por(conn, f"{col_c} LIKE ?", ("%" + cel9,), min_ymd, ref_ymd=ref_ymd)
             rp = conn.execute(
-                f"SELECT dni, nombre, empresa, ruc, celular, visitas, hab_frec, tarifa_frec FROM huespedes_padron "
-                f"WHERE {col_p} LIKE ? ORDER BY visitas DESC LIMIT 1", ("%" + cel9,)).fetchone()
+                f"SELECT dni, nombre, empresa, ruc, celular FROM huespedes_padron WHERE {col_c} LIKE ? ORDER BY visitas DESC LIMIT 1",
+                ("%" + cel9,),
+            ).fetchone()
             if rp:
-                huesped = dict(rp)
+                huesped_pad = dict(rp)
                 if not est_cel and rp["dni"]:
-                    est_cel = _estancia_por(conn, "dni=?", (rp["dni"],), min_ymd)
-        # --- vía 2: texto
-        for h in ent.get("habs") or []:
-            est_txt = _estancia_por(conn, "TRIM(hab)=?", (str(h),), min_ymd)
-            if est_txt:
-                coincidencias.append(f"hab {h}")
-                break
+                    est_cel = _estancia_por(conn, "dni=?", (rp["dni"],), min_ymd, ref_ymd=ref_ymd)
+
+        if ent.get("cpe"):
+            est_txt = _estancia_por(conn, "UPPER(TRIM(nro_comp))=UPPER(?)", (ent["cpe"],), min_ymd - 100, ref_ymd=ref_ymd)
         if not est_txt and ent.get("dni"):
-            est_txt = _estancia_por(conn, "dni=?", (ent["dni"],), min_ymd)
-            if est_txt:
-                coincidencias.append("dni")
-            elif not huesped:
-                rp = conn.execute("SELECT dni, nombre, empresa, ruc, celular, visitas, hab_frec, tarifa_frec "
-                                  "FROM huespedes_padron WHERE dni=? LIMIT 1", (ent["dni"],)).fetchone()
+            est_txt = _estancia_por(conn, "TRIM(dni)=?", (ent["dni"],), min_ymd, ref_ymd=ref_ymd)
+            if not est_txt and not huesped_pad:
+                rp = conn.execute(
+                    "SELECT dni, nombre, empresa, ruc, celular FROM huespedes_padron WHERE TRIM(dni)=? LIMIT 1",
+                    (ent["dni"],),
+                ).fetchone()
                 if rp:
-                    huesped = dict(rp)
+                    huesped_pad = dict(rp)
         if not est_txt and ent.get("ruc"):
-            est_txt = _estancia_por(conn, "ruc=?", (ent["ruc"],), min_ymd)
-            if est_txt:
-                coincidencias.append("ruc")
-            elif not huesped:
-                rp = conn.execute("SELECT dni, nombre, empresa, ruc, celular, visitas, hab_frec, tarifa_frec "
-                                  "FROM huespedes_padron WHERE ruc=? LIMIT 1", (ent["ruc"],)).fetchone()
-                if rp:
-                    huesped = dict(rp)
-        if not est_txt and ent.get("nombre"):
-            partes = [x for x in _sin_tildes(ent["nombre"]).upper().split() if len(x) >= 3][:3]
-            if len(partes) >= 2:
-                cond = " AND ".join("UPPER(huesped) LIKE ?" for _ in partes)
-                est_txt = _estancia_por(conn, cond, tuple(f"%{x}%" for x in partes), min_ymd)
+            est_txt = _estancia_por(conn, "TRIM(ruc)=?", (ent["ruc"],), min_ymd, ref_ymd=ref_ymd)
+        if not est_txt and ent.get("habs"):
+            # Elegir la última habitación mencionada o la activa en la fecha del chat
+            for h in reversed(ent["habs"]):
+                est_txt = _estancia_por(conn, "TRIM(hab)=?", (str(h),), min_ymd, ref_ymd=ref_ymd)
                 if est_txt:
-                    coincidencias.append("nombre")
+                    break
+        if not est_cel and not est_txt and nombre_chat:
+            limpio_nom = re.sub(r"[^A-Za-zÁÉÍÓÚáéíóúÑñ\s]", " ", nombre_chat)
+            tokens_nom = [
+                w for w in _sin_tildes(limpio_nom).upper().split()
+                if len(w) >= 4 and w not in {"OVALO", "MARIATEGUI", "HOTEL", "HOSTAL", "CLIENTE", "HOLA", "PARA"}
+            ]
+            if len(tokens_nom) >= 2:
+                p1, p2 = tokens_nom[0], tokens_nom[1]
+                est_txt = _estancia_por(
+                    conn,
+                    "UPPER(huesped) LIKE ? AND UPPER(huesped) LIKE ?",
+                    (f"%{p1}%", f"%{p2}%"),
+                    min_ymd - 100,
+                    ref_ymd=ref_ymd,
+                )
 
-        via = None
-        estancia = None
+        via: Optional[str] = None
+        est = None
         if est_cel and est_txt:
-            if est_cel["uuid"] == est_txt["uuid"]:
-                via, estancia = "AMBAS", est_txt
-                coincidencias.insert(0, "celular")
-            else:
-                via, estancia = "TEXTO", est_txt  # el texto manda; se informa la otra
+            via = "AMBAS" if est_cel["uuid"] == est_txt["uuid"] else "TEXTO"
+            est = est_txt
         elif est_cel:
-            via, estancia = "CELULAR", est_cel
-            coincidencias.insert(0, "celular")
+            via, est = "CELULAR", est_cel
         elif est_txt:
-            via, estancia = "TEXTO", est_txt
-        elif huesped:
-            via = "CELULAR" if cel9 else "TEXTO"
+            via, est = "TEXTO", est_txt
+        elif huesped_pad:
+            via = "PADRON"
 
-        res: Dict[str, Any] = {"via": via, "estancia": estancia, "huesped": huesped, "pagos": None,
-                               "comprobante": None, "auditoria_25": None, "coincidencias": coincidencias}
-        if est_cel and est_txt and est_cel["uuid"] != est_txt["uuid"]:
-            res["estancia_por_celular"] = {"hab": est_cel["hab"], "huesped": est_cel["huesped"]}
-        if estancia:
-            res["pagos"] = {"total": estancia["pagado"], "saldo": estancia["saldo"], "cuenta_total": estancia["total"]}
-            res["comprobante"] = _comprobante_info(conn, estancia)
-            if categoria == "COMPROBANTE":
-                monto = ent.get("precio_ref") or (ent.get("montos") or [None])[0]
-                res["auditoria_25"] = auditar_comprobante(estancia, monto, res["comprobante"])
-        return res
+        if est:
+            est_sunat, _ = _estado_sunat_texto(conn, est, ent.get("cpe"))
+            obs_25 = _observacion_25_texto(est, ent.get("precio_ref"))
+            dni_ruc = est["ruc"] or est["dni"] or ent.get("ruc") or ent.get("dni") or ""
+            return {
+                "encontrado": True,
+                "via": via,
+                "hab": est["hab"],
+                "huesped": est["huesped"],
+                "dni_ruc": dni_ruc,
+                "dni": est["dni"] or ent.get("dni") or "",
+                "ruc": est["ruc"] or ent.get("ruc") or "",
+                "check_in": est["check_in"],
+                "check_out": est["check_out"],
+                "tarifa_noches": f"S/ {est['tarifa']:.2f} × {est['noches']} noche(s)",
+                "pagado": est["pagado"],
+                "saldo": est["saldo"],
+                "estado_sunat": est_sunat,
+                "observacion_25": obs_25,
+                "entidades": ent,
+            }
+
+        if huesped_pad:
+            dni_ruc = str(huesped_pad.get("ruc") or huesped_pad.get("dni") or "")
+            return {
+                "encontrado": True,
+                "via": via,
+                "hab": ent["habs"][-1] if ent["habs"] else "",
+                "huesped": str(huesped_pad.get("nombre") or ""),
+                "dni_ruc": dni_ruc,
+                "dni": str(huesped_pad.get("dni") or ""),
+                "ruc": str(huesped_pad.get("ruc") or ""),
+                "check_in": "-",
+                "check_out": "-",
+                "tarifa_noches": "Huésped en padrón (sin estancia activa)",
+                "pagado": 0.0,
+                "saldo": 0.0,
+                "estado_sunat": f"CPE {ent['cpe']}" if ent.get("cpe") else "Sin estancia reciente",
+                "observacion_25": "",
+                "entidades": ent,
+            }
+
+        return {
+            "encontrado": False,
+            "via": None,
+            "hab": ent["habs"][-1] if ent["habs"] else "",
+            "huesped": "",
+            "dni_ruc": ent.get("ruc") or ent.get("dni") or "",
+            "dni": ent.get("dni") or "",
+            "ruc": ent.get("ruc") or "",
+            "check_in": "",
+            "check_out": "",
+            "tarifa_noches": "",
+            "pagado": 0.0,
+            "saldo": 0.0,
+            "estado_sunat": f"Emitido ({ent['cpe']})" if ent.get("cpe") else "Sin cruce en BD",
+            "observacion_25": "",
+            "entidades": ent,
+        }
     finally:
         conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Libres hoy / plantillas
+# Lectura de conversaciones recientes de clientes (100 % RO)
 # ---------------------------------------------------------------------------
-_libres_cache: Dict[str, Any] = {"ts": 0.0, "datos": []}
-
-
-def _primer_precio(precio_ref: Any) -> str:
-    m = re.search(r"\d+(?:\.\d+)?", str(precio_ref or ""))
-    return m.group(0) if m else ""
-
-
-_libres_lock = threading.Lock()
-_libres_refrescando = False
-
-
-def _calcular_libres() -> List[Dict[str, Any]]:
-    import domain_logic as dl
-    panel = dl.obtener_datos_panel_local(None)
-    grupos: Dict[Tuple[str, str], List[str]] = {}
-    for h in panel.get("habitaciones", []):
-        if str(h.get("estado") or "").lower() == "libre":
-            grupos.setdefault((str(h.get("tipo") or ""), str(h.get("precioRef") or "")), []).append(str(h.get("hab")))
-    return [{"tipo": t, "precio": pr, "precio_num": _primer_precio(pr), "habs": sorted(hs), "cantidad": len(hs)}
-            for (t, pr), hs in sorted(grupos.items(), key=lambda kv: (float(_primer_precio(kv[0][1]) or 0), kv[0][0]))]
-
-
-def _refrescar_libres() -> None:
-    global _libres_refrescando
-    try:
-        _libres_cache.update({"ts": _ahora(), "datos": _calcular_libres()})
-    except Exception:
-        _libres_cache["ts"] = _ahora() - 20  # reintenta pronto
-    finally:
-        _libres_refrescando = False
-
-
-def libres_hoy() -> List[Dict[str, Any]]:
-    """Habitaciones libres hoy agrupadas por tipo y precio de referencia (panel local).
-    Caché de 30 s; al vencer se refresca en segundo plano (el panel tarda ~2 s) y se devuelve el último valor."""
-    global _libres_refrescando
-    if _libres_cache["ts"]:
-        if _ahora() - _libres_cache["ts"] >= 30:
-            with _libres_lock:
-                if not _libres_refrescando:
-                    _libres_refrescando = True
-                    threading.Thread(target=_refrescar_libres, name="WspLibres", daemon=True).start()
-        return _libres_cache["datos"]
-    with _libres_lock:  # primera vez: síncrono
-        if not _libres_cache["ts"]:
-            _refrescar_libres()
-    return _libres_cache["datos"]
-
-
-def _texto_disponibilidad() -> str:
-    libres = libres_hoy()
-    if not libres:
-        return "Por ahora no tenemos habitaciones libres para hoy. Con gusto le avisamos si se libera alguna. 🙏"
-    partes = list(dict.fromkeys(
-        f"{g['tipo']} S/ {g['precio_num']}" if g.get("precio_num") else g["tipo"] for g in libres))
-    return "Hoy tenemos libres: " + ", ".join(partes) + ". ¿Cuál le interesa y a qué hora llegaría? 😊"
-
-
-def _plantillas_renderizadas() -> Dict[str, str]:
-    out = dict(PLANTILLAS)
-    out["DISPONIBILIDAD"] = _texto_disponibilidad()
-    return out
-
-
-def _render_plantilla(nombre: str) -> str:
-    if nombre == "DISPONIBILIDAD":
-        return _texto_disponibilidad()
-    return PLANTILLAS.get(nombre, "")
-
-
-# ---------------------------------------------------------------------------
-# Análisis de chats (pendiente / categoría)
-# ---------------------------------------------------------------------------
-def _resumen(textos: List[str], largo: int = 90) -> str:
-    s = " / ".join(t.strip().replace("\n", " ") for t in textos if t and t.strip())
-    return s if len(s) <= largo else s[: largo - 1] + "…"
-
-
-_PLACEHOLDER_TIPO = {"imagen": "[Imagen]", "image": "[Imagen]", "foto": "[Imagen]", "documento": "[Documento]",
-                     "document": "[Documento]", "pdf": "[Documento]", "audio": "[Audio]", "ptt": "[Audio]",
-                     "video": "[Video]", "sticker": "[Sticker]"}
+_PLACEHOLDER_TIPO = {
+    "imagen": "[Imagen]", "image": "[Imagen]", "foto": "[Imagen]",
+    "documento": "[Documento]", "document": "[Documento]", "pdf": "[Documento]",
+    "audio": "[Audio]", "ptt": "[Audio]", "video": "[Video]", "sticker": "[Sticker]",
+}
 
 
 def _texto_visible(m: Dict[str, Any]) -> str:
@@ -999,429 +869,751 @@ def _texto_visible(m: Dict[str, Any]) -> str:
     return t or _PLACEHOLDER_TIPO.get(str(m.get("tipo") or "").lower(), "")
 
 
-def _analizar_chat(jid: str, msgs: List[Dict[str, Any]], estado: Dict[str, Any], ahora: float,
-                   habs: Set[str]) -> Dict[str, Any]:
-    nombre = ""
-    for m in reversed(msgs):
-        if not m["es_mio"] and (m["chat_nombre"] or m["emisor"]):
-            nombre = m["chat_nombre"] or m["emisor"]
-            break
-    if not nombre:
-        nombre = next((m["chat_nombre"] for m in reversed(msgs) if m["chat_nombre"]), "") or _celular9(jid) or jid
-    interno = _es_interno(jid, nombre)
-    ultimo_ts = msgs[-1]["ts"]
-    info: Dict[str, Any] = {"jid": jid, "nombre": nombre, "interno": interno, "msgs": msgs, "ultimo_ts": ultimo_ts,
-                            "pendiente": False, "categoria": None, "confianza": 0.0, "espera_min": 0, "primer_ts": 0,
-                            "burst": [], "atendido": False, "motivos": []}
-    if interno:
-        info["categoria"] = "INTERNO"
-        return info
-
-    ult_mio = max((m["ts"] for m in msgs if m["es_mio"]), default=0)
-    corte = max(ult_mio, int((estado or {}).get("atendido_hasta_ts") or 0))
-    pend = [m for m in msgs if not m["es_mio"] and m["ts"] > corte and not es_ruido_mensaje(m["texto"], m["tipo"])]
-
-    if pend:
-        burst = pend
-        pendiente = True
-    else:
-        # ráfaga más reciente del cliente (referencia para las pestañas por categoría)
-        burst = []
-        for m in reversed(msgs):
-            if m["es_mio"]:
-                if burst:
-                    break
-                continue
-            burst.append(m)
-        burst = [m for m in reversed(burst) if not es_ruido_mensaje(m["texto"], m["tipo"])]
-        pendiente = False
-        if not burst:
-            return info
-
-    ids_adj = [m["mid"] for m in burst if str(m["tipo"]).lower() in _TIPOS_ADJUNTO]
-    ocr = None
-    if ids_adj:
-        docs = _leer_ocr(ids_adj)
-        if docs:
-            ocr = {"texto": " ".join(d["texto"] for d in docs.values()),
-                   "monto": next((d["monto"] for d in docs.values() if d["monto"]), "")}
-    texto_unido = " / ".join(_texto_visible(m) for m in burst if _texto_visible(m))
-    tipo_dom = next((str(m["tipo"]).lower() for m in burst if str(m["tipo"]).lower() in _TIPOS_ADJUNTO), "texto")
-    cl = clasificar(texto_unido, tipo_dom, ocr)
-    categoria, conf, motivos = cl["categoria"], cl["confianza"], list(cl["motivos"])
-    if len(burst) > 1:
-        # un último mensaje claramente de dinero/documento (voucher o comprobante) no debe quedar oculto por la ráfaga
-        ultimo = burst[-1]
-        cl_u = clasificar(_texto_visible(ultimo), str(ultimo["tipo"]).lower(), ocr)
-        if (cl_u["categoria"] in ("VOUCHER", "COMPROBANTE") and cl_u["categoria"] != categoria
-                and cl_u["puntaje"] >= 4.0):
-            categoria, conf, motivos = cl_u["categoria"], cl_u["confianza"], ["ultimo_mensaje"] + cl_u["motivos"]
-    if categoria is None:
-        ctx = " / ".join(_texto_visible(m) for m in msgs[-6:] if _texto_visible(m))
-        cl2 = clasificar(ctx, tipo_dom, ocr)
-        if cl2["categoria"]:
-            categoria, conf, motivos = cl2["categoria"], round(cl2["confianza"] * 0.6, 2), ["contexto"] + cl2["motivos"]
-    manual = str((estado or {}).get("categoria_manual") or "").strip().upper()
-    if manual in CATEGORIAS:
-        categoria, conf, motivos = manual, 1.0, ["manual"]
-    if categoria is None:
-        # sin pistas léxicas: si el celular es de un huésped activo -> HABITACION; si no -> RESERVA (prospecto)
-        activo = False
-        c9 = _celular9(jid)
-        if c9:
-            conn = get_connection()
-            try:
-                col = _SQL_CEL.format(c="celular")
-                activo = conn.execute(
-                    f"SELECT 1 FROM estancias WHERE {col} LIKE ? AND LOWER(COALESCE(estado_estancia,''))='en curso' LIMIT 1",
-                    ("%" + c9,)).fetchone() is not None
-            except Exception:
-                activo = False
-            finally:
-                conn.close()
-        categoria = "HABITACION" if activo else "RESERVA"
-        conf, motivos = 0.25, ["sin_pistas:" + ("huesped_activo" if activo else "prospecto")]
-
-    primer_ts = burst[0]["ts"]
-    info.update({
-        "burst": burst, "categoria": categoria, "confianza": conf, "motivos": motivos, "primer_ts": primer_ts,
-        "texto_burst": texto_unido, "pendiente": pendiente and primer_ts >= ahora - VENTANA_ALERTAS_H * 3600,
-        "espera_min": max(0, int((ahora - primer_ts) // 60)),
-        "atendido": (not pendiente) and corte > 0,
-    })
-    return info
-
-
-def _analizar_todos(ventana_s: int) -> List[Dict[str, Any]]:
-    ahora = _ahora()
-    msgs = _leer_mensajes(int(ahora - ventana_s))
-    estados = _cargar_estado_chats()
-    habs = _habs_validas()
-    por_chat: Dict[str, List[Dict[str, Any]]] = {}
-    for m in msgs:
-        j = str(m["chat"] or "")
-        if not j or j.endswith(_JIDS_IGNORADOS_SUFIJOS) or j == "status@broadcast":
-            continue
-        por_chat.setdefault(j, []).append(m)
-    return [_analizar_chat(j, ms, estados.get(j, {}), ahora, habs) for j, ms in por_chat.items()]
-
-
-def _nivel(espera_min: int) -> str:
-    return "ROJO" if espera_min >= UMBRAL_ROJO_MIN else "AMBAR"
-
-
-# ---------------------------------------------------------------------------
-# Cache de cruce por chat (para el polling liviano)
-# ---------------------------------------------------------------------------
-_cruce_cache: Dict[Tuple[str, int], Tuple[float, Dict[str, Any], Dict[str, Any]]] = {}
-
-
-def _cruce_chat(info: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """-> (entidades, cruce) con caché de 20 s por (jid, primer_ts)."""
-    key = (info["jid"], int(info.get("primer_ts") or 0))
-    hit = _cruce_cache.get(key)
-    if hit and _ahora() - hit[0] < 20:
-        return hit[1], hit[2]
-    ent = extraer_entidades(info.get("texto_burst", ""), _habs_validas())
+def _recolectar_chats_clientes() -> List[Dict[str, Any]]:
+    """Lee las conversaciones recientes de clientes en modo solo lectura (excluyendo internos)."""
+    sql = """
+        SELECT COALESCE(chat_jid, jid)                         AS chat,
+               COALESCE(id_mensaje, id)                        AS mid,
+               COALESCE(timestamp_unix, timestamp, 0)          AS ts,
+               COALESCE(fecha_hora, '')                        AS fecha_hora,
+               MAX(COALESCE(es_mio, 0), COALESCE(desde_recepcion, 0)) AS es_mio,
+               COALESCE(tipo_mensaje, tipo, 'texto')           AS tipo,
+               COALESCE(texto, '')                             AS texto,
+               COALESCE(chat_nombre, '')                       AS chat_nombre,
+               COALESCE(nombre_emisor, remitente_nombre, '')   AS emisor
+          FROM wsp_recepcion_mensajes
+         WHERE COALESCE(chat_jid, jid) NOT LIKE 'SIM-%'
+         ORDER BY ts ASC
+    """
+    op = _abrir_operativa_ro() if MODO_PRUEBA else None
+    conn = op if op is not None else _abrir_local_ro()
     try:
-        cr = cruzar(info["jid"], ent, info.get("categoria"))
-    except Exception as exc:  # el cruce nunca debe tumbar la bandeja
-        cr = {"via": None, "estancia": None, "huesped": None, "pagos": None, "comprobante": None,
-              "auditoria_25": None, "error": str(exc)}
-    if len(_cruce_cache) > 300:
-        _cruce_cache.clear()
-    _cruce_cache[key] = (_ahora(), ent, cr)
-    return ent, cr
-
-
-# ---------------------------------------------------------------------------
-# API pública: alertas / bandeja
-# ---------------------------------------------------------------------------
-def auto_adelanto_activo() -> bool:
-    conn = get_connection()
-    try:
-        r = conn.execute("SELECT valor FROM estado_sistema WHERE clave='wsp_auto_adelanto'").fetchone()
-        return bool(r and str(r[0]).strip() in ("1", "true", "True", "SI", "si"))
+        filas = [dict(r) for r in conn.execute(sql).fetchall()]
     except Exception:
-        return False
+        if op is not None:
+            op.close()
+            conn = _abrir_local_ro()
+            filas = [dict(r) for r in conn.execute(sql).fetchall()]
+        else:
+            filas = []
     finally:
-        conn.close()
-
-
-def obtener_alertas_wsp() -> Dict[str, Any]:
-    """Liviano (polling cada 5 s)."""
-    ahora = _ahora()
-    chats = _analizar_todos(VENTANA_ALERTAS_H * 3600)
-    pend = [c for c in chats if c["pendiente"]]
-    pend.sort(key=lambda c: c["primer_ts"])  # el más antiguo primero
-    estado = estado_daemon()
-    max_esp = max((c["espera_min"] for c in pend), default=0)
-    if pend:
-        nivel = _nivel(max_esp)
-    elif estado != "CONECTADO":
-        nivel = "SIN_CONEXION"
-    else:
-        nivel = "OK"
-    top = []
-    for c in pend[:2]:
-        ent, cr = _cruce_chat(c)
-        hab = (ent.get("habs") or [None])[0] or ((cr.get("estancia") or {}).get("hab")) or None
-        top.append({"jid": c["jid"], "nombre": c["nombre"], "categoria": c["categoria"],
-                    "resumen": _resumen([_texto_visible(m) for m in c["burst"]]), "hab": hab,
-                    "espera_min": c["espera_min"], "nivel": _nivel(c["espera_min"])})
-    por_cat = {k: 0 for k in CATEGORIAS}
-    for c in pend:
-        por_cat[c["categoria"]] = por_cat.get(c["categoria"], 0) + 1
-    return {"estado_daemon": estado, "pendientes": len(pend), "max_espera_min": max_esp, "nivel": nivel, "top": top,
-            "pendientes_por_categoria": por_cat, "modo_prueba": bool(MODO_PRUEBA), "auto_adelanto": auto_adelanto_activo(),
-            "ts": int(ahora)}
-
-
-def _normalizar_pestana(p: Any) -> str:
-    s = _sin_tildes(str(p or "PENDIENTES")).upper().strip()
-    mapa = {"PENDIENTES": "PENDIENTES", "PENDIENTE": "PENDIENTES", "COMPROBANTE": "COMPROBANTE",
-            "COMPROBANTES": "COMPROBANTE", "RESERVA": "RESERVA", "RESERVAS": "RESERVA", "HABITACION": "HABITACION",
-            "HABITACIONES": "HABITACION", "VOUCHER": "VOUCHER", "VOUCHERS": "VOUCHER", "INTERNO": "INTERNO",
-            "INTERNOS": "INTERNO", "GRUPOS": "INTERNO"}
-    return mapa.get(s, "PENDIENTES")
-
-
-def _acciones(categoria: str, cr: Dict[str, Any], libres: bool = True) -> List[Dict[str, Any]]:
-    est = (cr or {}).get("estancia") or {}
-    comp = (cr or {}).get("comprobante") or {}
-    acc: List[Dict[str, Any]] = []
-
-    def enviar(id_: str, etiqueta: str, plantilla: str) -> None:
-        acc.append({"id": id_, "etiqueta": etiqueta, "tipo": "enviar", "plantilla": plantilla,
-                    "texto": _render_plantilla(plantilla)})
-
-    if categoria == "RESERVA":
-        enviar("ADELANTO_RESERVA", "Preguntar tipo y hora", "ADELANTO_RESERVA")
-        enviar("DISPONIBILIDAD", "Enviar disponibilidad de hoy", "DISPONIBILIDAD")
-    elif categoria == "COMPROBANTE":
-        if est.get("hab"):
-            acc.append({"id": "PREFILL", "etiqueta": "Pre-llenar comprobante", "tipo": "prellenar", "plantilla": "",
-                        "texto": "", "hab": est["hab"]})
-        if comp.get("emitido"):
-            acc.append({"id": "REENVIAR_PDF", "etiqueta": "Reenviar PDF", "tipo": "enviar",
-                        "plantilla": "COMPROBANTE_EMITIDO",
-                        "texto": PLANTILLAS["COMPROBANTE_EMITIDO"].replace("Su comprobante", f"Su comprobante {comp.get('nro')}".strip()),
-                        "nro": comp.get("nro")})
-        enviar("COMPROBANTE_DATOS", "Pedir RUC/DNI", "COMPROBANTE_DATOS")
-        enviar("COMPROBANTE_EN_PROCESO", "Recibido, en proceso", "COMPROBANTE_EN_PROCESO")
-    elif categoria == "HABITACION":
-        enviar("HAB_RECIBIDO", "Recibido, enseguida", "HAB_RECIBIDO")
-    elif categoria == "VOUCHER":
-        acc.append({"id": "VER_YAPES", "etiqueta": "Ver en Yapes", "tipo": "ver_yapes", "plantilla": "", "texto": ""})
-        enviar("VOUCHER_RECIBIDO", "Pago recibido", "VOUCHER_RECIBIDO")
-    return acc
-
-
-def _tarjeta(info: Dict[str, Any], con_cruce: bool = True) -> Dict[str, Any]:
-    msgs = info["msgs"][-MAX_MENSAJES_TARJETA:]
-    mensajes = [{"hora": _hora_txt(m["ts"]), "es_mio": bool(m["es_mio"]), "texto": _texto_visible(m),
-                 "tipo": str(m["tipo"] or "texto"), "ts": int(m["ts"])} for m in msgs]
-    base = {"jid": info["jid"], "nombre": info["nombre"], "celular9": _celular9(info["jid"]),
-            "categoria": info["categoria"], "confianza": info["confianza"], "espera_min": info["espera_min"],
-            "nivel": _nivel(info["espera_min"]) if info["pendiente"] else "OK", "mensajes": mensajes,
-            "pendiente": info["pendiente"], "interno": info["interno"], "atendido": info["atendido"],
-            "ultimo_ts": int(info["ultimo_ts"]), "simulado": str(info["jid"]).upper().startswith("SIM-"),
-            "motivos": info.get("motivos", []), "entidades": {}, "cruce": None, "acciones": []}
-    if info["interno"] or not info.get("burst"):
-        return base
-    if con_cruce:
-        ent, cr = _cruce_chat(info)
-        base["entidades"], base["cruce"] = ent, cr
-        base["acciones"] = _acciones(info["categoria"], cr)
-        if info["categoria"] == "RESERVA":
-            base["libres"] = libres_hoy()
-    return base
-
-
-def obtener_bandeja_completa(pestana: str = "PENDIENTES") -> Dict[str, Any]:
-    pest = _normalizar_pestana(pestana)
-    chats = _analizar_todos(VENTANA_BANDEJA_DIAS * 86400)
-    conteos = {"PENDIENTES": 0, "COMPROBANTE": 0, "RESERVA": 0, "HABITACION": 0, "VOUCHER": 0, "INTERNO": 0}
-    for c in chats:
-        if c["interno"]:
-            conteos["INTERNO"] += 1
-            continue
-        if c["pendiente"]:
-            conteos["PENDIENTES"] += 1
-        if c["categoria"] in conteos:
-            conteos[c["categoria"]] += 1
-    if pest == "PENDIENTES":
-        sel = sorted((c for c in chats if c["pendiente"]), key=lambda c: c["primer_ts"])
-    elif pest == "INTERNO":
-        sel = sorted((c for c in chats if c["interno"]), key=lambda c: c["ultimo_ts"], reverse=True)
-    else:
-        sel = sorted((c for c in chats if not c["interno"] and c["categoria"] == pest),
-                     key=lambda c: c["ultimo_ts"], reverse=True)
-    tarjetas = [_tarjeta(c) for c in sel[:MAX_TARJETAS]]
-    return {"pestana": pest, "tarjetas": tarjetas, "conteos": conteos, "modo_prueba": bool(MODO_PRUEBA),
-            "auto_adelanto": auto_adelanto_activo(), "plantillas": _plantillas_renderizadas(),
-            "libres_hoy": libres_hoy(), "estado_daemon": estado_daemon()}
-
-
-def obtener_bandeja_wsp(pestana: str = "PENDIENTES") -> List[Dict[str, Any]]:
-    """Contrato del plan: lista de tarjetas (el RPC usa obtener_bandeja_completa)."""
-    return obtener_bandeja_completa(pestana)["tarjetas"]
-
-
-# ---------------------------------------------------------------------------
-# Escrituras (solo base local)
-# ---------------------------------------------------------------------------
-def _upsert_estado_chat(conn: sqlite3.Connection, jid: str, **campos: Any) -> None:
-    cols = ["chat_jid"] + list(campos.keys()) + ["actualizado_en"]
-    vals = [jid] + list(campos.values())
-    marcas = ",".join(["?"] * len(vals)) + ",datetime('now','localtime')"
-    sets = ",".join(f"{k}=excluded.{k}" for k in list(campos.keys()) + ["actualizado_en"])
-    conn.execute(
-        f"INSERT INTO wsp_alertas_estado ({','.join(cols)}) VALUES ({marcas}) "
-        f"ON CONFLICT(chat_jid) DO UPDATE SET {sets}",
-        vals,
-    )
-
-
-def _insertar_mensaje_sim(conn: sqlite3.Connection, jid: str, nombre: str, texto: str, es_mio: int,
-                          tipo: str = "texto") -> str:
-    """Inserta un mensaje SIMULADO (jid SIM-) en la base LOCAL. Nunca se usa con jids reales."""
-    if not str(jid).upper().startswith("SIM-"):
-        raise ValueError("Solo se permiten mensajes simulados (jid con prefijo SIM-)")
-    ts = int(_ahora())
-    mid = "SIM-" + uuid.uuid4().hex[:16].upper()
-    fecha = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-    emisor = "Ovalo Mariategui" if es_mio else nombre
-    conn.execute(
-        """INSERT INTO wsp_recepcion_mensajes
-           (id_mensaje, jid, remitente_jid, nombre_emisor, es_mio, timestamp_unix, fecha_hora, tipo_mensaje, texto,
-            tiene_archivo, id, chat_jid, chat_nombre, remitente_nombre, desde_recepcion, timestamp, tipo)
-           VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)""",
-        (mid, jid, "recepcion" if es_mio else jid, emisor, es_mio, ts, fecha, tipo, texto,
-         mid, jid, nombre, emisor, es_mio, ts, tipo),
-    )
-    return mid
-
-
-def enviar_respuesta(jid: str, texto: str, plantilla: str = "", usuario: str = "") -> Dict[str, Any]:
-    """MODO_PRUEBA -> cola LOCAL con estado='SIMULADO'. Operativa -> cola con estado='PENDIENTE' (lo envía wsp_daemon.js)."""
-    jid = str(jid or "").strip()
-    plantilla = str(plantilla or "").strip()
-    texto = str(texto or "").strip()
-    if not jid:
-        return {"ok": False, "error": "Falta el jid del chat"}
-    if jid.endswith("@g.us"):
-        return {"ok": False, "error": "No se envían respuestas a grupos desde el visor"}
-    if not texto and plantilla:
-        texto = _render_plantilla(plantilla)
-    if not texto:
-        return {"ok": False, "error": "Texto vacío"}
-    if len(texto) > 4000:
-        return {"ok": False, "error": "Texto demasiado largo (máx. 4000)"}
-    _asegurar_tablas()
-    simulado = bool(MODO_PRUEBA)
-    estado = "SIMULADO" if simulado else "PENDIENTE"
-    c9 = _celular9(jid)
-    destino = jid if "@" in jid and not jid.upper().startswith("SIM-") else (f"51{c9}" if c9 else jid)
-    conn = get_connection()
-    try:
-        cur = conn.execute(
-            """INSERT INTO wsp_recepcion_cola_envio
-               (telefono_o_jid, mensaje, texto, destino_telefono, cliente_nombre, estado, detalle_error)
-               VALUES (?,?,?,?,?,?,?)""",
-            (destino, texto, texto, c9 or destino, str(usuario or ""), estado,
-             "Simulado (MODO_PRUEBA): no se envió por WhatsApp" if simulado else None),
-        )
-        cola_id = cur.lastrowid
-        ahora = int(_ahora())
-        extra: Dict[str, Any] = {}
-        if plantilla == "ADELANTO_RESERVA":
-            extra["adelanto_enviado_ts"] = ahora
-        if simulado:
-            # el eco de WhatsApp nunca volverá en la prueba: se apaga la alerta localmente
-            extra["atendido_hasta_ts"] = ahora
-            extra["atendido_por"] = (str(usuario or "") + " (simulado)").strip()
-            if jid.upper().startswith("SIM-"):
-                _insertar_mensaje_sim(conn, jid, "", texto, es_mio=1)
-        if extra:
-            _upsert_estado_chat(conn, jid, **extra)
-        conn.commit()
-    finally:
-        conn.close()
-    return {"ok": True, "simulado": simulado, "estado": estado, "id": cola_id, "jid": jid, "texto": texto,
-            "plantilla": plantilla,
-            "mensaje": "Simulado: no se envió por WhatsApp" if simulado else "En cola: se enviará en unos segundos"}
-
-
-def marcar_atendido(jid: str, usuario: str = "") -> Dict[str, Any]:
-    jid = str(jid or "").strip()
-    if not jid:
-        return {"ok": False, "error": "Falta el jid del chat"}
-    _asegurar_tablas()
-    ts = int(_ahora())
-    conn = get_connection()
-    try:
-        _upsert_estado_chat(conn, jid, atendido_hasta_ts=ts, atendido_por=str(usuario or ""))
-        conn.commit()
-    finally:
-        conn.close()
-    return {"ok": True, "jid": jid, "atendido_hasta_ts": ts, "atendido_por": str(usuario or "")}
-
-
-def configurar_auto_adelanto(activo: bool, usuario: str = "") -> Dict[str, Any]:
-    conn = get_connection()
-    try:
-        conn.execute(
-            "INSERT INTO estado_sistema (clave, valor, updated_at) VALUES ('wsp_auto_adelanto', ?, datetime('now','localtime')) "
-            "ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor, updated_at=excluded.updated_at",
-            ("1" if activo else "0",),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return {"ok": True, "activo": bool(activo), "usuario": str(usuario or "")}
-
-
-def tick_auto_adelanto() -> None:
-    """Hilo de fondo (cada 30 s): si el interruptor está activo y un chat RESERVA lleva >= 3 min sin respuesta
-    y sin adelanto previo en esa ráfaga -> enviar ADELANTO_RESERVA una sola vez."""
-    if not auto_adelanto_activo():
-        return
-    estados = _cargar_estado_chats()
-    for c in _analizar_todos(VENTANA_ALERTAS_H * 3600):
-        if not c["pendiente"] or c["categoria"] != "RESERVA" or c["interno"]:
-            continue
-        if c["espera_min"] < AUTO_ADELANTO_MIN:
-            continue
-        if int((estados.get(c["jid"]) or {}).get("adelanto_enviado_ts") or 0) >= c["primer_ts"]:
-            continue
         try:
-            enviar_respuesta(c["jid"], "", "ADELANTO_RESERVA", "AUTO")
+            conn.close()
         except Exception:
             pass
 
+    por_jid: Dict[str, List[Dict[str, Any]]] = {}
+    for m in filas:
+        j = str(m["chat"] or "").strip()
+        if not j:
+            continue
+        por_jid.setdefault(j, []).append(m)
 
-def simular_mensaje(jid: str, nombre: str, texto: str) -> Dict[str, Any]:
-    """SOLO MODO_PRUEBA: inserta un mensaje entrante simulado en la base LOCAL (jid con prefijo SIM-)."""
-    if not MODO_PRUEBA:
-        return {"ok": False, "error": "simularMensajeWsp solo existe en MODO_PRUEBA"}
-    texto = str(texto or "").strip()
-    if not texto:
-        return {"ok": False, "error": "Texto vacío"}
-    jid = str(jid or "SIM-999999999").strip()
-    if not jid.upper().startswith("SIM-"):
-        jid = "SIM-" + (_solo_digitos(jid) or "999999999")
-    nombre = str(nombre or "Cliente Prueba").strip() or "Cliente Prueba"
+    ahora = _ahora()
+    inicio_hoy = int(datetime.combine(date.today(), datetime.min.time()).timestamp())
+    chats_todos: List[Dict[str, Any]] = []
+
+    for jid, msgs in por_jid.items():
+        nombre = ""
+        for m in reversed(msgs):
+            if not m["es_mio"] and (m["chat_nombre"] or m["emisor"]):
+                nombre = m["chat_nombre"] or m["emisor"]
+                break
+        if not nombre:
+            nombre = next(
+                (
+                    m["chat_nombre"]
+                    for m in reversed(msgs)
+                    if m["chat_nombre"] and "ovalo mariategui" not in m["chat_nombre"].lower()
+                ),
+                "",
+            ) or _celular9(jid) or jid
+        if _es_interno(jid, nombre):
+            continue
+
+        recientes = msgs[-MAX_MENSAJES_CHAT:]
+        ultimo_ts = int(recientes[-1]["ts"] or 0)
+        texto_todo = " \n ".join(_texto_visible(m) for m in recientes if _texto_visible(m))
+        cruce = cruzar_conversacion(jid, nombre, texto_todo, ultimo_ts)
+
+        # Si el nombre en WSP era "Ovalo Mariategui" (mensaje iniciado por recepción), enriquecer con huésped cruzado
+        nombre_limpio = nombre
+        if nombre_limpio.strip().lower() in ("ovalo mariategui", "") and cruce.get("huesped"):
+            nombre_limpio = cruce["huesped"].title()
+        elif cruce.get("huesped") and _celular9(nombre_limpio) == _celular9(jid):
+            nombre_limpio = cruce["huesped"].title()
+
+        mensajes_ui = [
+            {
+                "hora": _hora_txt(int(m["ts"] or 0)),
+                "es_mio": bool(m["es_mio"]),
+                "texto": _texto_visible(m),
+                "tipo": str(m["tipo"] or "texto").lower(),
+                "ts": int(m["ts"] or 0),
+            }
+            for m in recientes[-MAX_MENSAJES_VISTA:]
+            if _texto_visible(m)
+        ]
+
+        chats_todos.append({
+            "jid": jid,
+            "cliente": nombre_limpio,
+            "celular": _celular9(jid),
+            "ultimo_ts": ultimo_ts,
+            "es_hoy": ultimo_ts >= inicio_hoy,
+            "es_48h": ultimo_ts >= (ahora - 48 * 3600),
+            "cruce": cruce,
+            "mensajes_raw": recientes,
+            "mensajes": mensajes_ui,
+        })
+
+    chats_todos.sort(key=lambda c: c["ultimo_ts"], reverse=True)
+    chats_hoy_48h = [c for c in chats_todos if c["es_48h"]]
+    if len(chats_hoy_48h) >= 5:
+        return chats_hoy_48h[:18]
+    return chats_todos[:14]
+
+
+# ---------------------------------------------------------------------------
+# Analizador Heurístico Contextual Local (respaldo instantáneo 100 % fiel)
+# ---------------------------------------------------------------------------
+_RE_PROMESA_COMP = re.compile(
+    r"\b(emitimos|enviamos|mandamos|pasamos|generamos|un momento|en la manana|enseguida)\b.*\b(factura|boleta|comprobante)\b"
+    r"|\b(factura|boleta|comprobante)\b.*\b(emitimos|enviamos|manana)\b",
+    re.I,
+)
+_RE_AGRADECIMIENTO = re.compile(
+    r"\b(gracias|muchas gracias|mil gracias|agradecid|conforme|perfecto|listo|ok|dale|esta bien|buenisimo|genial)\b",
+    re.I,
+)
+_RE_CIERRE_ENCARGO_MESA = re.compile(
+    r"^(ok\s*/?\s*)?(dele la llave|dejo la llave|ya bajo|estoy afuera|abre la puerta)(\s+\d{3})?$",
+    re.I,
+)
+
+
+def _etiqueta_cliente_hab(chat: Dict[str, Any]) -> Tuple[str, str]:
+    hab = str((chat.get("cruce") or {}).get("hab") or "").strip()
+    cli = str(chat.get("cliente") or chat.get("celular") or chat.get("jid"))
+    if hab and f"hab {hab}".lower() not in cli.lower():
+        return f"{cli} (Hab {hab})", hab
+    return cli, hab
+
+
+def _resumir_que_pidio(msgs_cli: List[Dict[str, Any]], msgs_rec: List[Dict[str, Any]], cruce: Dict[str, Any]) -> Tuple[str, str]:
+    """Devuelve (tipo_principal, descripcion_que_pidio)."""
+    txt_cli = " ".join(_texto_visible(m) for m in msgs_cli)
+    txt_rec = " ".join(_texto_visible(m) for m in msgs_rec)
+    norm_cli, _ = _normalizar(txt_cli)
+    norm_all, _ = _normalizar(txt_cli + " " + txt_rec)
+    ent = (cruce or {}).get("entidades") or extraer_entidades(txt_cli + " " + txt_rec)
+    hab = (cruce or {}).get("hab") or (ent["habs"][-1] if ent.get("habs") else "")
+
+    cpe_m = _RE_CPE.search(txt_rec + " " + txt_cli)
+    if cpe_m or any(w in norm_cli for w in ("factura", "boleta", "ruc", "comprobante")):
+        cpe_str = f" ({cpe_m.group(1).upper()})" if cpe_m else ""
+        doc_t = "Factura Electrónica" if ("factura" in norm_all or (cpe_m and cpe_m.group(1).upper().startswith("E001"))) else "Boleta Electrónica"
+        hab_s = f" de la Hab {hab}" if hab else ""
+        return "COMPROBANTE", f"Solicitó emisión/envío de {doc_t}{cpe_str}{hab_s}"
+
+    if any(w in norm_cli for w in ("reserva", "reservar", "disponibilidad", "disponible", "precio", "costo", "matrimonial", "simple", "doble", "abitacion", "habitacion")):
+        if "llave" in norm_cli or "pasar" in norm_cli:
+            hab_s = f" (Hab {hab})" if hab else ""
+            return "HABITACION", f"Solicitó habitación simple adicional y coordinó ingreso de visita / entrega de llave{hab_s}"
+        tipo_h = ("matrimonial" if "matrimonial" in norm_cli else "simple" if "simple" in norm_cli else ent.get("tipo_hab") or "de alojamiento")
+        extra = " con baño privado y Netflix" if "netflix" in norm_cli else ""
+        return "RESERVA", f"Consultó disponibilidad y tarifa de habitación {tipo_h}{extra}"
+
+    if any(w in norm_cli for w in ("llave", "visita", "pasar", "toalla", "agua", "ducha", "wifi")):
+        hab_s = f" para la Hab {hab}" if hab else ""
+        return "HABITACION", f"Coordinación operativa de huésped alojado (llaves / autorización de ingreso){hab_s}"
+
+    if any(str(m.get("tipo")) in ("imagen", "documento") for m in msgs_cli) or any(w in norm_cli for w in ("yape", "plin", "pago", "transferencia")):
+        return "PAGO", "Envió imagen/constancia de pago o consulta gráfica por WhatsApp"
+
+    if any("cenas" in _sin_tildes(_texto_visible(m)).lower() for m in msgs_rec):
+        return "HABITACION", "Aviso de recepción al huésped sobre llegada de pedido/cenas"
+
+    return "HABITACION", (txt_cli.strip()[:110] or "Comunicación operativa con recepción")
+
+
+def _analizar_heuristico_local(chats: List[Dict[str, Any]]) -> Dict[str, Any]:
+    ahora = _ahora()
+    pendientes_responder: List[Dict[str, Any]] = []
+    recomendaciones_y_notas: List[Dict[str, Any]] = []
+    atendidos_y_gracias: List[Dict[str, Any]] = []
+
+    for ch in chats:
+        msgs = ch["mensajes_raw"]
+        if not msgs:
+            continue
+        cruce = ch["cruce"]
+        cli_label, hab = _etiqueta_cliente_hab(ch)
+        msgs_cli = [m for m in msgs if not m["es_mio"]]
+        msgs_rec = [m for m in msgs if m["es_mio"]]
+        tipo_princ, que_pidio = _resumir_que_pidio(msgs_cli, msgs_rec, cruce)
+
+        ult_mio_ts = max((int(m["ts"] or 0) for m in msgs_rec), default=0)
+        sin_resp = [m for m in msgs_cli if int(m["ts"] or 0) > ult_mio_ts and not es_ruido_mensaje(m["texto"], m["tipo"])]
+
+        txt_cli_all = " / ".join(_texto_visible(m) for m in msgs_cli)
+        txt_rec_all = " / ".join(_texto_visible(m) for m in msgs_rec)
+        norm_cli_all, _ = _normalizar(txt_cli_all)
+        norm_rec_all, _ = _normalizar(txt_rec_all)
+
+        # 1) ¿Prometió recepción enviar factura/boleta y aún no envió PDF en este chat?
+        tiene_pdf_enviado = any(
+            m["es_mio"] and (
+                str(m["tipo"]).lower() in ("documento", "document", "pdf")
+                or ".pdf" in str(m["texto"] or "").lower()
+                or bool(_RE_CPE.search(str(m["texto"] or "")))
+            )
+            for m in msgs
+        )
+        promesa_comp_abierta = (
+            tipo_princ == "COMPROBANTE"
+            and not tiene_pdf_enviado
+            and any(bool(_RE_PROMESA_COMP.search(_sin_tildes(_texto_visible(m)))) for m in msgs_rec)
+        )
+
+        # 2) ¿El último tramo sin responder es solo un encargo presencial antiguo (> 12 h, ej. "Dele la llave 406")?
+        txt_sin_resp = " ".join(_texto_visible(m) for m in sin_resp).strip()
+        antig_horas = (ahora - int(sin_resp[0]["ts"] or ahora)) / 3600.0 if sin_resp else 0.0
+        es_encargo_presencial_antiguo = (
+            bool(sin_resp)
+            and antig_horas > 12.0
+            and bool(_RE_CIERRE_ENCARGO_MESA.match(_sin_tildes(txt_sin_resp).strip()))
+            and len(msgs_rec) > 0
+        )
+
+        es_pendiente = False
+        motivo_pendiente = ""
+        primer_pend_ts = int(msgs[-1]["ts"] or 0)
+
+        if promesa_comp_abierta:
+            es_pendiente = True
+            primer_pend_ts = int(msgs_cli[-1]["ts"] if msgs_cli else msgs[-1]["ts"])
+            est_s = cruce.get("estado_sunat") or "sin PDF en el chat"
+            motivo_pendiente = (
+                f"Solicitó su comprobante y recepción indicó que lo emitiría, pero aún no se ha enviado el PDF por WhatsApp "
+                f"(Estado en BD: {est_s})."
+            )
+        elif sin_resp and not es_encargo_presencial_antiguo:
+            es_pendiente = True
+            primer_pend_ts = int(sin_resp[0]["ts"] or 0)
+            if all(str(m["tipo"]).lower() in _TIPOS_ADJUNTO for m in sin_resp):
+                tipo_princ = "PAGO"
+                n_img = len(sin_resp)
+                motivo_pendiente = (
+                    f"El cliente envió {n_img} archivo(s)/imagen(es) sin texto y recepción aún no ha confirmado recepción "
+                    f"(verificar si corresponde a voucher Yape/transferencia)."
+                )
+            else:
+                resumen_msg = " / ".join(_texto_visible(m) for m in sin_resp)[:140]
+                motivo_pendiente = f"Mensaje del cliente sin respuesta de recepción: «{resumen_msg}»."
+
+        cruce_limpio = {k: v for k, v in cruce.items() if k != "entidades"}
+
+        if es_pendiente:
+            espera_m = max(0, int((ahora - primer_pend_ts) // 60)) if ch["es_hoy"] else 0
+            pendientes_responder.append({
+                "jid": ch["jid"],
+                "cliente": cli_label,
+                "celular": ch["celular"],
+                "hora_ultimo_msg": _hora_txt(int(msgs[-1]["ts"] or 0)),
+                "espera_min": espera_m,
+                "es_hoy": bool(ch["es_hoy"]),
+                "tipo": tipo_princ if tipo_princ in ("COMPROBANTE", "RESERVA", "HABITACION", "PAGO") else "HABITACION",
+                "motivo_pendiente": motivo_pendiente,
+                "cruce": cruce_limpio,
+                "mensajes": ch["mensajes"],
+            })
+        else:
+            # Analizar cierre para Bloque 3 (Atendidos / Por qué dijeron gracias)
+            ult_cli_txt = _texto_visible(msgs_cli[-1]) if msgs_cli else ""
+            dijo_gracias = any(_RE_AGRADECIMIENTO.search(_sin_tildes(_texto_visible(m))) for m in msgs_cli[-3:])
+            if tiene_pdf_enviado:
+                cpe_m = _RE_CPE.search(txt_rec_all)
+                cpe_txt = cpe_m.group(1).upper() if cpe_m else "electrónico"
+                if dijo_gracias:
+                    cierre = f"Recepción envió el PDF del comprobante {cpe_txt} y el cliente confirmó recepción («{ult_cli_txt}»)."
+                else:
+                    cierre = f"Recepción emitió y dejó enviado el PDF del comprobante {cpe_txt} al cliente."
+            elif "reservado" in norm_rec_all:
+                cierre = "Recepción verificó su abono/DNI y dejó confirmada la reserva («ya está reservado, gracias»)."
+            elif "hasta 35" in norm_rec_all or "ok gracias de todos modos" in norm_cli_all:
+                cierre = "Recepción informó disponibilidad y tarifas vigentes (ofreciendo tarifa especial S/ 35); el cliente agradeció la información."
+            elif "ya esta bien" in norm_rec_all or es_encargo_presencial_antiguo:
+                cierre = "Recepción atendió la coordinación de habitación/visita («ya está bien») y el huésped cerró conforme."
+            elif msgs_rec and not msgs_cli:
+                cierre = f"Aviso informativo enviado por recepción («{_texto_visible(msgs_rec[-1])[:80]}»)."
+            else:
+                cierre = f"Consulta atendida por recepción{f'; cliente cerró con «{ult_cli_txt[:50]}»' if ult_cli_txt else ''}."
+
+            atendidos_y_gracias.append({
+                "jid": ch["jid"],
+                "cliente": cli_label,
+                "celular": ch["celular"],
+                "hab": hab,
+                "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
+                "que_pidio": que_pidio,
+                "por_que_agradecio": cierre,
+                "mensajes": ch["mensajes"],
+            })
+
+        # Bloque 2: Recomendaciones, Reclamos o Acuerdos importantes detectados en la conversación
+        if any(k in norm_cli_all for k in ("no hay agua", "agua fria", "malogrado", "no funciona", "sucio", "bulla", "reclamo", "queja")):
+            recomendaciones_y_notas.append({
+                "jid": ch["jid"],
+                "cliente": cli_label,
+                "celular": ch["celular"],
+                "hab": hab,
+                "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
+                "tipo_nota": "RECLAMO",
+                "detalle": f"Incidencia reportada por el huésped en el chat: «{txt_cli_all[:130]}».",
+            })
+        elif "dele la llave" in norm_cli_all or "le hace pasar" in norm_cli_all or "va preguntar" in norm_cli_all:
+            recomendaciones_y_notas.append({
+                "jid": ch["jid"],
+                "cliente": cli_label,
+                "celular": ch["celular"],
+                "hab": hab or "406",
+                "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
+                "tipo_nota": "ACUERDO",
+                "detalle": f"El huésped autorizó el ingreso de visita y pidió entregar la llave en recepción (Hab {hab or '406'}).",
+            })
+        elif "reservado" in norm_rec_all:
+            no_bol = " (indicó que NO requiere boleta)" if re.search(r"\bno\b", norm_cli_all.split()[-3:] and " ".join(norm_cli_all.split()[-4:]) or "") else ""
+            recomendaciones_y_notas.append({
+                "jid": ch["jid"],
+                "cliente": cli_label,
+                "celular": ch["celular"],
+                "hab": hab,
+                "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
+                "tipo_nota": "ACUERDO",
+                "detalle": f"Reserva confirmada de habitación matrimonial S/ 75 con abono previo por Yape y llegada nocturna{no_bol}.",
+            })
+        elif "sabia quedarme con 30" in norm_cli_all or "hasta 35" in norm_rec_all:
+            recomendaciones_y_notas.append({
+                "jid": ch["jid"],
+                "cliente": cli_label,
+                "celular": ch["celular"],
+                "hab": hab,
+                "hora": _hora_txt(int(msgs[-1]["ts"] or 0)),
+                "tipo_nota": "RECOMENDACION",
+                "detalle": "Cliente frecuente comentó tarifa histórica de S/ 30 en simple; recepción ofreció excepción hasta S/ 35 pero no concretó ingreso.",
+            })
+
+    n_p = len(pendientes_responder)
+    n_a = len(atendidos_y_gracias)
+    n_r = len(recomendaciones_y_notas)
+    if n_p == 0 and n_a == 0:
+        sintesis = "Sin conversaciones recientes de clientes por revisar en WhatsApp de Recepción."
+    elif n_p == 0:
+        sintesis = f"WhatsApp al día: {n_a} conversación(es) atendidas correctamente y {n_r} acuerdo(s)/nota(s) registrados, sin respuestas pendientes."
+    else:
+        sintesis = (
+            f"Se detectan {n_p} conversación(es) que requieren seguimiento o envío de comprobante, "
+            f"{n_r} acuerdo(s)/observación(es) relevantes y {n_a} chat(s) ya atendidos y cerrados."
+        )
+
+    return {
+        "resumen_general_turno": sintesis,
+        "pendientes_responder": pendientes_responder,
+        "recomendaciones_y_notas": recomendaciones_y_notas,
+        "atendidos_y_gracias": atendidos_y_gracias,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Agente IA con Gemini (`gemini-3.8-flash` -> `gemini-2.5-flash` -> local)
+# ---------------------------------------------------------------------------
+_gemini_cooldown_until: float = 0.0
+_gemini_last_keys_sig: str = ""
+
+
+def _llamar_agente_gemini(chats: List[Dict[str, Any]]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Intenta analizar las conversaciones con google.genai. Retorna (dict_resultado | None, fuente_ia)."""
+    global _gemini_cooldown_until, _gemini_last_keys_sig
+    if not chats:
+        return None, ""
+    keys = _cargar_api_keys_gemini()
+    if not keys:
+        return None, ""
+
+    sig = "|".join(k[:8] + str(len(k)) for k in keys)
+    if sig != _gemini_last_keys_sig:
+        _gemini_cooldown_until = 0.0
+        _gemini_last_keys_sig = sig
+
+    if _ahora() < _gemini_cooldown_until:
+        return None, ""
+
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+    except Exception:
+        return None, ""
+
+    contexto_chats = []
+    for ch in chats:
+        cruce_res = {k: v for k, v in ch["cruce"].items() if k != "entidades"}
+        contexto_chats.append({
+            "jid": ch["jid"],
+            "cliente": ch["cliente"],
+            "celular": ch["celular"],
+            "es_hoy": ch["es_hoy"],
+            "cruce_bd_hotel": cruce_res,
+            "conversacion": [
+                {"hora": m["hora"], "quien": "RECEPCION" if m["es_mio"] else "CLIENTE", "tipo": m["tipo"], "texto": m["texto"]}
+                for m in ch["mensajes"]
+            ],
+        })
+
+    prompt = (
+        "Eres el Auditor y Analista Ejecutivo de Recepción del Hotel El Óvalo Mariátegui (Tacna, Perú).\n"
+        "Analiza íntegramente las siguientes conversaciones reales de WhatsApp entre CLIENTE y RECEPCION, "
+        "junto con su cruce en la base de datos del hotel (`cruce_bd_hotel`).\n"
+        "Discierne el contexto real de toda la charla (no palabras sueltas):\n"
+        "1. `pendientes_responder`: SOLO chats donde el cliente sigue esperando respuesta real o donde recepción prometió "
+        "enviar una factura/boleta y aún NO se envió el PDF en el chat. No pongas aquí chats que cerraron con 'ok/gracias' "
+        "ni encargos antiguos ya resueltos.\n"
+        "2. `recomendaciones_y_notas`: acuerdos operativos importantes (encargo de llaves, autorización de visitas, reservas "
+        "pactadas con hora de llegada, excepciones de tarifa) o reclamos/sugerencias del huésped. `tipo_nota` debe ser "
+        "estrictamente 'ACUERDO', 'RECOMENDACION' o 'RECLAMO'.\n"
+        "3. `atendidos_y_gracias`: chats ya atendidos/cerrados explicando en 1 línea clara `que_pidio` y `por_que_agradecio` "
+        "(cómo se resolvió o por qué dio las gracias).\n\n"
+        "Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta:\n"
+        "{\n"
+        '  "resumen_general_turno": "síntesis ejecutiva clara en 1-2 oraciones",\n'
+        '  "pendientes_responder": [{"jid": "...", "tipo": "COMPROBANTE|RESERVA|HABITACION|PAGO", "motivo_pendiente": "..."}],\n'
+        '  "recomendaciones_y_notas": [{"jid": "...", "hab": "...", "tipo_nota": "ACUERDO|RECOMENDACION|RECLAMO", "detalle": "..."}],\n'
+        '  "atendidos_y_gracias": [{"jid": "...", "hab": "...", "que_pidio": "...", "por_que_agradecio": "..."}]\n'
+        "}\n\n"
+        f"CONVERSACIONES A ANALIZAR:\n{json.dumps(contexto_chats, ensure_ascii=False)}"
+    )
+
+    modelos = ("gemini-3.8-flash", "gemini-2.5-flash")
+    agotado_402 = False
+
+    for api_key in keys:
+        client = genai.Client(api_key=api_key)
+        for modelo in modelos:
+            try:
+                cfg_gen = genai_types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                )
+                resp = client.models.generate_content(model=modelo, contents=prompt, config=cfg_gen)
+                raw_txt = (resp.text or "").strip()
+                if raw_txt.startswith("```"):
+                    raw_txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_txt, flags=re.S).strip()
+                parsed = json.loads(raw_txt)
+                if isinstance(parsed, dict) and "pendientes_responder" in parsed and "atendidos_y_gracias" in parsed:
+                    return _hidratar_respuesta_ia(parsed, chats), f"Gemini IA ({modelo})"
+            except Exception as exc:
+                msg_err = str(exc)
+                if "402" in msg_err or "prepayment credits are depleted" in msg_err.lower() or "API_KEY_INVALID" in msg_err:
+                    agotado_402 = True
+                    break  # misma cuenta sin saldo: no repetir otro modelo con la misma key
+                continue
+
+    if agotado_402:
+        # Evita demorar los ticks de fondo durante 3 minutos si la cuenta sigue sin saldo
+        _gemini_cooldown_until = _ahora() + 180.0
+    return None, ""
+
+
+def _hidratar_respuesta_ia(parsed: Dict[str, Any], chats: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Combina las explicaciones del modelo Gemini con los mensajes literales y fichas de cruce de SQLite."""
+    ahora = _ahora()
+    mapa = {c["jid"]: c for c in chats}
+
+    pend_out: List[Dict[str, Any]] = []
+    for it in parsed.get("pendientes_responder") or []:
+        if not isinstance(it, dict):
+            continue
+        jid = str(it.get("jid") or "")
+        ch = mapa.get(jid)
+        if not ch:
+            continue
+        cli_label, _ = _etiqueta_cliente_hab(ch)
+        msgs = ch["mensajes_raw"]
+        ult_mio = max((int(m["ts"] or 0) for m in msgs if m["es_mio"]), default=0)
+        sin_resp = [m for m in msgs if not m["es_mio"] and int(m["ts"] or 0) > ult_mio]
+        ref_ts = int(sin_resp[0]["ts"] if sin_resp else msgs[-1]["ts"])
+        espera_m = max(0, int((ahora - ref_ts) // 60)) if ch["es_hoy"] else 0
+        cruce_limpio = {k: v for k, v in ch["cruce"].items() if k != "entidades"}
+        tipo_val = str(it.get("tipo") or "HABITACION").upper()
+        if tipo_val not in ("COMPROBANTE", "RESERVA", "HABITACION", "PAGO"):
+            tipo_val = "HABITACION"
+        pend_out.append({
+            "jid": jid,
+            "cliente": str(it.get("cliente") or cli_label),
+            "celular": ch["celular"],
+            "hora_ultimo_msg": _hora_txt(int(msgs[-1]["ts"] or 0)),
+            "espera_min": espera_m,
+            "es_hoy": bool(ch["es_hoy"]),
+            "tipo": tipo_val,
+            "motivo_pendiente": str(it.get("motivo_pendiente") or ""),
+            "cruce": cruce_limpio,
+            "mensajes": ch["mensajes"],
+        })
+
+    rec_out: List[Dict[str, Any]] = []
+    for it in parsed.get("recomendaciones_y_notas") or []:
+        if not isinstance(it, dict):
+            continue
+        jid = str(it.get("jid") or "")
+        ch = mapa.get(jid)
+        cli_label, hab_c = _etiqueta_cliente_hab(ch) if ch else (str(it.get("cliente") or jid), "")
+        t_nota = str(it.get("tipo_nota") or "ACUERDO").upper()
+        if t_nota not in ("ACUERDO", "RECOMENDACION", "RECLAMO"):
+            t_nota = "ACUERDO"
+        rec_out.append({
+            "jid": jid,
+            "cliente": str(it.get("cliente") or cli_label),
+            "celular": ch["celular"] if ch else _celular9(jid),
+            "hab": str(it.get("hab") or hab_c or ""),
+            "hora": _hora_txt(int(ch["mensajes_raw"][-1]["ts"] or 0)) if ch and ch["mensajes_raw"] else "",
+            "tipo_nota": t_nota,
+            "detalle": str(it.get("detalle") or ""),
+        })
+
+    atend_out: List[Dict[str, Any]] = []
+    for it in parsed.get("atendidos_y_gracias") or []:
+        if not isinstance(it, dict):
+            continue
+        jid = str(it.get("jid") or "")
+        ch = mapa.get(jid)
+        if not ch:
+            continue
+        cli_label, hab_c = _etiqueta_cliente_hab(ch)
+        atend_out.append({
+            "jid": jid,
+            "cliente": str(it.get("cliente") or cli_label),
+            "celular": ch["celular"],
+            "hab": str(it.get("hab") or hab_c or ""),
+            "hora": _hora_txt(int(ch["mensajes_raw"][-1]["ts"] or 0)) if ch["mensajes_raw"] else "",
+            "que_pidio": str(it.get("que_pidio") or ""),
+            "por_que_agradecio": str(it.get("por_que_agradecio") or ""),
+            "mensajes": ch["mensajes"],
+        })
+
+    return {
+        "resumen_general_turno": str(parsed.get("resumen_general_turno") or ""),
+        "pendientes_responder": pend_out,
+        "recomendaciones_y_notas": rec_out,
+        "atendidos_y_gracias": atend_out,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Persistencia del corte ejecutivo y reloj programado (08:00, 13:00, 19:00, 23:00)
+# ---------------------------------------------------------------------------
+_analisis_lock = threading.Lock()
+
+
+def _proximo_corte_hora(dt_ref: Optional[datetime] = None) -> str:
+    dt = dt_ref or datetime.now()
+    hhmm = dt.strftime("%H:%M")
+    for h in HORARIOS_FIJOS:
+        if h > hhmm:
+            return h
+    return HORARIOS_FIJOS[0]
+
+
+def _formatear_fecha_hora_corte(fecha_hora_iso: str) -> Tuple[str, str]:
+    """Devuelve (hora_hhmm, fecha_dmy) desde 'YYYY-MM-DD HH:MM:SS'."""
+    try:
+        dt = datetime.strptime(fecha_hora_iso[:19], "%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%H:%M"), dt.strftime("%d/%m/%Y")
+    except Exception:
+        ahora_dt = datetime.now()
+        return ahora_dt.strftime("%H:%M"), ahora_dt.strftime("%d/%m/%Y")
+
+
+def ejecutar_analisis_agente_wsp(forzar: bool = False, slot_horario: str = "") -> Dict[str, Any]:
+    """Ejecuta el análisis completo de conversaciones con Agente IA (o respaldo contextual local),
+    lo guarda en `wsp_resumen_ejecutivo` y devuelve el payload completo para la UI."""
+    global _gemini_cooldown_until
+    _asegurar_tablas()
+    with _analisis_lock:
+        if not forzar and not slot_horario:
+            existente = _leer_ultimo_corte_db()
+            if existente is not None:
+                return _construir_respuesta_bandeja(existente)
+
+        if forzar:
+            # Si el usuario pulsó "Actualizar resumen ahora", reintentar Gemini en vivo
+            _gemini_cooldown_until = 0.0
+
+        chats = _recolectar_chats_clientes()
+        resultado_ia, fuente_ia = _llamar_agente_gemini(chats)
+        if resultado_ia is None:
+            resultado_ia = _analizar_heuristico_local(chats)
+            fuente_ia = "Agente Contextual Local"
+
+        ahora_dt = datetime.now()
+        fecha_hora_str = ahora_dt.strftime("%Y-%m-%d %H:%M:%S")
+        slot_guardar = slot_horario or ("MANUAL " + ahora_dt.strftime("%H:%M") if forzar else ahora_dt.strftime("%Y-%m-%d %H:%M"))
+
+        conn = get_connection()
+        try:
+            conn.execute(
+                "INSERT INTO wsp_resumen_ejecutivo (fecha_hora, slot_horario, fuente_ia, payload_json) VALUES (?, ?, ?, ?)",
+                (fecha_hora_str, slot_guardar, fuente_ia, json.dumps(resultado_ia, ensure_ascii=False)),
+            )
+            # Mantener historial acotado a los últimos 80 cortes
+            conn.execute(
+                "DELETE FROM wsp_resumen_ejecutivo WHERE id NOT IN (SELECT id FROM wsp_resumen_ejecutivo ORDER BY id DESC LIMIT 80)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        registro = {
+            "fecha_hora": fecha_hora_str,
+            "slot_horario": slot_guardar,
+            "fuente_ia": fuente_ia,
+            "payload": resultado_ia,
+        }
+        return _construir_respuesta_bandeja(registro)
+
+
+def _leer_ultimo_corte_db() -> Optional[Dict[str, Any]]:
     _asegurar_tablas()
     conn = get_connection()
     try:
-        mid = _insertar_mensaje_sim(conn, jid, nombre, texto, es_mio=0)
-        conn.commit()
+        r = conn.execute(
+            "SELECT id, fecha_hora, slot_horario, fuente_ia, payload_json FROM wsp_resumen_ejecutivo ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not r:
+            return None
+        try:
+            payload = json.loads(r["payload_json"] or "{}")
+        except Exception:
+            payload = {}
+        return {
+            "id": r["id"],
+            "fecha_hora": str(r["fecha_hora"] or ""),
+            "slot_horario": str(r["slot_horario"] or ""),
+            "fuente_ia": str(r["fuente_ia"] or "Agente Contextual Local"),
+            "payload": payload,
+        }
     finally:
         conn.close()
-    cl = clasificar(texto, "texto", None)
-    return {"ok": True, "jid": jid, "nombre": nombre, "id_mensaje": mid, "clasificacion": cl,
-            "entidades": extraer_entidades(texto, _habs_validas())}
+
+
+def _construir_respuesta_bandeja(reg: Dict[str, Any]) -> Dict[str, Any]:
+    payload = reg.get("payload") or {}
+    ult_hora, ult_fecha = _formatear_fecha_hora_corte(reg.get("fecha_hora") or "")
+    est_d = estado_daemon()
+    return {
+        "estado_daemon": est_d,
+        "ultimo_corte_hora": ult_hora,
+        "ultimo_corte_fecha": ult_fecha,
+        "slot_horario": str(reg.get("slot_horario") or ult_hora),
+        "proximo_corte_hora": _proximo_corte_hora(),
+        "fuente_ia": str(reg.get("fuente_ia") or "Agente Contextual Local"),
+        "horarios_fijos": list(HORARIOS_FIJOS),
+        "resumen_general_turno": str(payload.get("resumen_general_turno") or ""),
+        "pendientes_responder": list(payload.get("pendientes_responder") or []),
+        "recomendaciones_y_notas": list(payload.get("recomendaciones_y_notas") or []),
+        "atendidos_y_gracias": list(payload.get("atendidos_y_gracias") or []),
+    }
+
+
+def obtener_bandeja_wsp(_arg: Any = None) -> Dict[str, Any]:
+    """RPC obtenerBandejaWsp: devuelve instantáneamente el último corte ejecutivo de 3 bloques."""
+    reg = _leer_ultimo_corte_db()
+    if reg is None:
+        return ejecutar_analisis_agente_wsp(forzar=False, slot_horario=f"{date.today().isoformat()} INICIAL")
+    return _construir_respuesta_bandeja(reg)
+
+
+def obtener_alertas_wsp() -> Dict[str, Any]:
+    """RPC obtenerAlertasWsp: estado compacto para la barra superior (0 ms sobre caché SQLite)."""
+    bandeja = obtener_bandeja_wsp()
+    est_d = bandeja["estado_daemon"]
+    pend_list = bandeja["pendientes_responder"]
+    n_pend = len(pend_list)
+    n_atend = len(bandeja["atendidos_y_gracias"])
+    n_rec = len(bandeja["recomendaciones_y_notas"])
+    ult_hora = bandeja["ultimo_corte_hora"]
+    ult_fecha = bandeja["ultimo_corte_fecha"]
+    prox_hora = bandeja["proximo_corte_hora"]
+
+    urgente_hoy = any(bool(p.get("es_hoy")) and int(p.get("espera_min") or 0) >= UMBRAL_ROJO_MIN for p in pend_list)
+    if est_d != "CONECTADO" and n_pend == 0:
+        nivel = "SIN_CONEXION"
+        titular = f"WSP desconectado · Últ. corte {ult_hora}"
+    elif n_pend > 0:
+        nivel = "ROJO" if urgente_hoy else "AMBAR"
+        titular = f"WSP: {n_pend} por responder · {n_atend} atendidos (Corte {ult_hora})"
+    else:
+        nivel = "OK"
+        titular = f"WSP al día · {n_atend} chats resumidos (Corte {ult_hora})"
+
+    return {
+        "estado_daemon": est_d,
+        "pendientes": n_pend,
+        "atendidos": n_atend,
+        "recomendaciones": n_rec,
+        "pendientes_count": n_pend,
+        "atendidos_count": n_atend,
+        "recomendaciones_count": n_rec,
+        "ultimo_corte_hora": ult_hora,
+        "ultimo_corte_fecha": ult_fecha,
+        "proximo_corte_hora": prox_hora,
+        "fuente_ia": bandeja["fuente_ia"],
+        "nivel": nivel,
+        "titular_barra": titular,
+        "resumen_general": bandeja["resumen_general_turno"],
+    }
+
+
+def tick_resumen_programado() -> Optional[Dict[str, Any]]:
+    """Llamado por OvaloWspWorker cada 30 s:
+    1) Si `wsp_resumen_ejecutivo` está vacía, genera el primer corte inicial.
+    2) Cuando el reloj alcanza cualquiera de los 4 horarios fijos (`08:00`, `13:00`, `19:00`, `23:00`),
+       ejecuta el análisis exactamente una vez para ese slot."""
+    _asegurar_tablas()
+    ahora_dt = datetime.now()
+    hoy_iso = ahora_dt.strftime("%Y-%m-%d")
+    hhmm_actual = ahora_dt.strftime("%H:%M")
+
+    ultimo = _leer_ultimo_corte_db()
+    if ultimo is None:
+        return ejecutar_analisis_agente_wsp(forzar=False, slot_horario=f"{hoy_iso} INICIAL")
+
+    # Determinar el último slot fijo ya alcanzado hoy
+    slots_pasados = [h for h in HORARIOS_FIJOS if hhmm_actual >= h]
+    if not slots_pasados:
+        return None
+    slot_objetivo = slots_pasados[-1]
+    clave_slot = f"{hoy_iso} {slot_objetivo}"
+    marca_tiempo_slot = f"{hoy_iso} {slot_objetivo}:00"
+
+    conn = get_connection()
+    try:
+        ya_ejecutado = conn.execute(
+            "SELECT 1 FROM wsp_resumen_ejecutivo WHERE slot_horario = ? LIMIT 1",
+            (clave_slot,),
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+    if ya_ejecutado:
+        return None
+
+    # Ejecutar si estamos dentro de los primeros 15 min del slot fijo, o si el último corte fue anterior a ese slot
+    ult_fh = str(ultimo.get("fecha_hora") or "")
+    dt_slot = datetime.strptime(marca_tiempo_slot, "%Y-%m-%d %H:%M:%S")
+    en_ventana_puntual = 0 <= (ahora_dt - dt_slot).total_seconds() <= 900
+    if en_ventana_puntual or ult_fh < marca_tiempo_slot:
+        return ejecutar_analisis_agente_wsp(forzar=False, slot_horario=clave_slot)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1441,17 +1633,20 @@ def _daemon_corriendo(script: str = "wsp_daemon.js") -> bool:
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             f"Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object {{ $_.CommandLine -like '*{script}*' }} | "
-             f"Select-Object -First 1 -ExpandProperty ProcessId"],
-            capture_output=True, text=True, timeout=20, creationflags=flags)
+            [
+                "powershell", "-NoProfile", "-Command",
+                f"Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | "
+                f"Where-Object {{ $_.CommandLine -like '*{script}*' }} | Select-Object -First 1 -ExpandProperty ProcessId",
+            ],
+            capture_output=True, text=True, timeout=20, creationflags=flags,
+        )
         return bool(out.stdout.strip())
     except Exception:
-        return True  # ante la duda no se lanza un duplicado
+        return True
 
 
 def vigilar_daemon() -> Dict[str, Any]:
-    """Relanza ``node wsp_daemon.js`` si no hay proceso. NUNCA en MODO_PRUEBA. No relanza si pide QR / sesión cerrada."""
+    """Relanza `node wsp_daemon.js` si no hay proceso. NUNCA en MODO_PRUEBA."""
     if MODO_PRUEBA:
         return {"accion": "omitido", "motivo": "MODO_PRUEBA"}
     raw = _estado_daemon_raw().strip().upper()
@@ -1467,6 +1662,12 @@ def vigilar_daemon() -> Dict[str, Any]:
     if not Path(node).exists():
         return {"accion": "omitido", "motivo": "node no encontrado"}
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen([node, str(script)], cwd=str(carpeta), creationflags=flags,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    subprocess.Popen(
+        [node, str(script)],
+        cwd=str(carpeta),
+        creationflags=flags,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
     return {"accion": "lanzado", "node": node}
