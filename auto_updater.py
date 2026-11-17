@@ -601,6 +601,11 @@ def verificar_y_aplicar_actualizacion() -> Dict[str, Any]:
                         # HEAD local está adelantado respecto a origin/main; no pisar cambios locales
                         _guardar_sha_local(s_loc)
                         return {"actualizado": False, "motivo": "local_adelantado", "version": s_loc[:7]}
+                    # Historias divergidas: el local tiene commits propios sin publicar y el remoto también tiene nuevos.
+                    # NUNCA rebase/reset (destruiría el trabajo local): hay que fusionar a mano (git merge origin/main).
+                    propios = _run_git(["rev-list", "--count", "origin/main..HEAD"], timeout=5)
+                    if propios.returncode == 0 and propios.stdout.strip() not in ("", "0"):
+                        return {"actualizado": False, "motivo": "divergente_sin_pisar", "version": s_loc[:7]}
                     if s_rem:
                         try:
                             df = _run_git(["diff", "--name-only", s_loc, s_rem], timeout=10)
