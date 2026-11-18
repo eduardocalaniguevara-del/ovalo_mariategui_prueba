@@ -1748,7 +1748,14 @@ def ejecutar_analisis_agente_wsp(forzar: bool = False, slot_horario: str = "") -
                 return _construir_respuesta_bandeja(existente)
 
         if forzar:
-            # Si el usuario pulsó "Actualizar resumen ahora", reintentar Gemini en vivo
+            # Si el usuario pulsó "Actualizar resumen ahora", traer primero cualquier mensaje nuevo desde Supabase
+            try:
+                import supabase_sync as _ss
+                if hasattr(_ss, "_sincronizar_espejo_wsp_modo_prueba") and MODO_PRUEBA:
+                    _ss._sincronizar_espejo_wsp_modo_prueba()
+            except Exception:
+                pass
+            # Reintentar Gemini en vivo
             _gemini_cooldown_until = 0.0
 
         chats = _recolectar_chats_clientes()
