@@ -69,11 +69,19 @@ TABLAS_GRUPO2_PK: Dict[str, Tuple[str, ...]] = {
     "wsp_recepcion_mensajes": ("id",),
     "wsp_recepcion_documentos": ("id",),
     "wsp_recepcion_cola_envio": ("id",),
+    "wsp_recepcion_estado": ("clave",),
+    "wsp_resumen_ejecutivo": ("id",),
     "aprendizaje_compartido_hostal": ("id",),
-    "asistente_movimientos_log": ("log_uuid",),
 }
 
-_SANDBOX = bool(MODO_PRUEBA and SUPABASE_SANDBOX_CONNECTED)
+_SANDBOX = False  # Entorno de prueba 100% local: cero trafico hacia Supabase
+
+# Tablas de cache pesadas que se recalculan localmente desde Drive/Sheets y no deben saturar Supabase
+TABLAS_SOLO_LOCAL_CACHE = {
+    "yape_conciliacion_hostal",
+    "calzado_cache",
+    "sunat_lineas_cache",
+}
 
 
 def _resolve_pk_cols(conn, tabla: str) -> Tuple[str, ...]:
@@ -182,50 +190,91 @@ def init_supabase_local_triggers() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS wsp_recepcion_chats (
-                jid               TEXT PRIMARY KEY,
-                nombre            TEXT,
-                es_grupo          INTEGER DEFAULT 0,
-                ultimo_mensaje_ts INTEGER DEFAULT 0,
-                actualizado_en    TEXT DEFAULT (datetime('now', 'localtime'))
+                jid                  TEXT PRIMARY KEY,
+                nombre               TEXT,
+                tipo                 TEXT,
+                ultimo_mensaje       TEXT,
+                fecha_ultimo_mensaje TEXT,
+                no_leidos            INTEGER DEFAULT 0,
+                es_grupo             INTEGER DEFAULT 0,
+                ultimo_mensaje_ts    INTEGER DEFAULT 0,
+                actualizado_en       TEXT DEFAULT (datetime('now', 'localtime'))
             );
 
             CREATE TABLE IF NOT EXISTS wsp_recepcion_mensajes (
                 id               TEXT PRIMARY KEY,
+                id_mensaje       TEXT,
+                jid              TEXT,
                 chat_jid         TEXT,
                 chat_nombre      TEXT,
+                remitente_jid    TEXT,
+                nombre_emisor    TEXT,
                 remitente_nombre TEXT,
+                es_mio           INTEGER DEFAULT 0,
                 desde_recepcion  INTEGER DEFAULT 0,
-                fecha_hora       TEXT,
+                timestamp_unix   INTEGER,
                 timestamp        INTEGER,
+                fecha_hora       TEXT,
+                tipo_mensaje     TEXT,
                 tipo             TEXT,
                 texto            TEXT,
-                archivo_ruta     TEXT
+                tiene_archivo    INTEGER DEFAULT 0,
+                ruta_archivo     TEXT,
+                archivo_ruta     TEXT,
+                creado_en        TEXT DEFAULT (datetime('now', 'localtime'))
             );
 
             CREATE TABLE IF NOT EXISTS wsp_recepcion_documentos (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                mensaje_id      TEXT UNIQUE,
-                fecha_hora      TEXT,
-                chat_nombre     TEXT,
-                categoria       TEXT,
-                serie_numero    TEXT,
-                ruc_dni         TEXT,
-                monto_detectado REAL,
-                operacion_nro   TEXT,
-                archivo_ruta    TEXT,
-                texto_extraido  TEXT
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_mensaje        TEXT,
+                mensaje_id        TEXT UNIQUE,
+                jid               TEXT,
+                fecha_hora        TEXT,
+                chat_nombre       TEXT,
+                tipo_archivo      TEXT,
+                nombre_archivo    TEXT,
+                ruta_local        TEXT,
+                archivo_ruta      TEXT,
+                metodo_extraccion TEXT,
+                categoria         TEXT,
+                ruc_emisor        TEXT,
+                serie_numero      TEXT,
+                ruc_dni           TEXT,
+                monto_detectado   REAL,
+                operacion_nro     TEXT,
+                texto_extraido    TEXT,
+                fecha_procesado   TEXT DEFAULT (datetime('now', 'localtime'))
             );
 
             CREATE TABLE IF NOT EXISTS wsp_recepcion_cola_envio (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                destino_telefono TEXT NOT NULL,
+                telefono_o_jid   TEXT,
+                destino_telefono TEXT NOT NULL DEFAULT '',
                 cliente_nombre   TEXT,
                 nro_comprobante  TEXT,
+                mensaje          TEXT,
                 texto            TEXT,
+                ruta_adjunto     TEXT,
                 archivo_ruta     TEXT,
+                nombre_adjunto   TEXT,
                 estado           TEXT DEFAULT 'PENDIENTE',
+                detalle_error    TEXT,
                 creado_en        TEXT DEFAULT (datetime('now', 'localtime')),
                 enviado_en       TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS wsp_recepcion_estado (
+                clave          TEXT PRIMARY KEY,
+                valor          TEXT,
+                actualizado_en TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS wsp_resumen_ejecutivo (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha_hora   TEXT NOT NULL,
+                slot_horario TEXT NOT NULL,
+                fuente_ia    TEXT NOT NULL,
+                payload_json TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS aprendizaje_compartido_hostal (
@@ -239,25 +288,6 @@ def init_supabase_local_triggers() -> None:
                 regla_aprendida   TEXT NOT NULL DEFAULT '',
                 updated_at        TEXT DEFAULT ''
             );
-
-            CREATE TABLE IF NOT EXISTS asistente_movimientos_log (
-                log_uuid          TEXT PRIMARY KEY,
-                fecha_dmy         TEXT NOT NULL DEFAULT '',
-                hora              TEXT NOT NULL DEFAULT '',
-                ts_iso            TEXT NOT NULL DEFAULT '',
-                recepcionista     TEXT NOT NULL DEFAULT '',
-                tipo_interaccion  TEXT NOT NULL DEFAULT '',
-                pedido_original   TEXT NOT NULL DEFAULT '',
-                accion_ejecutada  TEXT NOT NULL DEFAULT '',
-                hab               TEXT NOT NULL DEFAULT '',
-                huesped           TEXT NOT NULL DEFAULT '',
-                monto             REAL NOT NULL DEFAULT 0,
-                estado_anterior   TEXT NOT NULL DEFAULT '{}',
-                estado_nuevo      TEXT NOT NULL DEFAULT '{}',
-                resumen_dueno     TEXT NOT NULL DEFAULT '',
-                equipo            TEXT NOT NULL DEFAULT ''
-            );
-            CREATE INDEX IF NOT EXISTS idx_asist_log_fecha ON asistente_movimientos_log (fecha_dmy, tipo_interaccion);
 
             -- Control de bucle y Bandeja de Salida Delta hacia Supabase
             CREATE TABLE IF NOT EXISTS _supabase_sync_control (
@@ -282,6 +312,64 @@ def init_supabase_local_triggers() -> None:
             r[0]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         }
+
+        _extra_wsp_cols = [
+            ("wsp_recepcion_chats", "tipo TEXT"),
+            ("wsp_recepcion_chats", "ultimo_mensaje TEXT"),
+            ("wsp_recepcion_chats", "fecha_ultimo_mensaje TEXT"),
+            ("wsp_recepcion_chats", "no_leidos INTEGER DEFAULT 0"),
+            ("wsp_recepcion_chats", "es_grupo INTEGER DEFAULT 0"),
+            ("wsp_recepcion_chats", "ultimo_mensaje_ts INTEGER DEFAULT 0"),
+            ("wsp_recepcion_mensajes", "id_mensaje TEXT"),
+            ("wsp_recepcion_mensajes", "id TEXT"),
+            ("wsp_recepcion_mensajes", "jid TEXT"),
+            ("wsp_recepcion_mensajes", "chat_jid TEXT"),
+            ("wsp_recepcion_mensajes", "chat_nombre TEXT"),
+            ("wsp_recepcion_mensajes", "remitente_jid TEXT"),
+            ("wsp_recepcion_mensajes", "nombre_emisor TEXT"),
+            ("wsp_recepcion_mensajes", "remitente_nombre TEXT"),
+            ("wsp_recepcion_mensajes", "es_mio INTEGER DEFAULT 0"),
+            ("wsp_recepcion_mensajes", "desde_recepcion INTEGER DEFAULT 0"),
+            ("wsp_recepcion_mensajes", "timestamp_unix INTEGER"),
+            ("wsp_recepcion_mensajes", "timestamp INTEGER"),
+            ("wsp_recepcion_mensajes", "fecha_hora TEXT"),
+            ("wsp_recepcion_mensajes", "tipo_mensaje TEXT"),
+            ("wsp_recepcion_mensajes", "tipo TEXT"),
+            ("wsp_recepcion_mensajes", "texto TEXT"),
+            ("wsp_recepcion_mensajes", "tiene_archivo INTEGER DEFAULT 0"),
+            ("wsp_recepcion_mensajes", "ruta_archivo TEXT"),
+            ("wsp_recepcion_mensajes", "archivo_ruta TEXT"),
+            ("wsp_recepcion_mensajes", "creado_en TEXT"),
+            ("wsp_recepcion_documentos", "id_mensaje TEXT"),
+            ("wsp_recepcion_documentos", "mensaje_id TEXT"),
+            ("wsp_recepcion_documentos", "jid TEXT"),
+            ("wsp_recepcion_documentos", "chat_nombre TEXT"),
+            ("wsp_recepcion_documentos", "tipo_archivo TEXT"),
+            ("wsp_recepcion_documentos", "nombre_archivo TEXT"),
+            ("wsp_recepcion_documentos", "ruta_local TEXT"),
+            ("wsp_recepcion_documentos", "archivo_ruta TEXT"),
+            ("wsp_recepcion_documentos", "metodo_extraccion TEXT"),
+            ("wsp_recepcion_documentos", "ruc_emisor TEXT"),
+            ("wsp_recepcion_documentos", "ruc_dni TEXT"),
+            ("wsp_recepcion_documentos", "fecha_procesado TEXT"),
+            ("wsp_recepcion_cola_envio", "telefono_o_jid TEXT"),
+            ("wsp_recepcion_cola_envio", "destino_telefono TEXT"),
+            ("wsp_recepcion_cola_envio", "cliente_nombre TEXT"),
+            ("wsp_recepcion_cola_envio", "nro_comprobante TEXT"),
+            ("wsp_recepcion_cola_envio", "mensaje TEXT"),
+            ("wsp_recepcion_cola_envio", "texto TEXT"),
+            ("wsp_recepcion_cola_envio", "ruta_adjunto TEXT"),
+            ("wsp_recepcion_cola_envio", "archivo_ruta TEXT"),
+            ("wsp_recepcion_cola_envio", "nombre_adjunto TEXT"),
+            ("wsp_recepcion_cola_envio", "detalle_error TEXT"),
+        ]
+        for _tbl, _cdef in _extra_wsp_cols:
+            if _tbl in existing_tables:
+                try:
+                    conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_cdef}")
+                except Exception:
+                    pass
+        _table_cols_cache.clear()
 
         for tabla in TABLAS_GRUPO2_PK.keys():
             if tabla not in existing_tables:
@@ -381,6 +469,9 @@ def push_to_supabase() -> int:
             grouped.setdefault(key, []).append((str(r["pk1"]), str(r["pk2"]), str(r["u_at"])))
 
         for (tabla, op), pk_list in grouped.items():
+            if tabla in TABLAS_SOLO_LOCAL_CACHE:
+                invalid_keys.extend((tabla, p1, p2) for (p1, p2, _) in pk_list)
+                continue
             pk_cols = _resolve_pk_cols(conn, tabla)
             if not pk_cols:
                 invalid_keys.extend((tabla, p1, p2) for (p1, p2, _) in pk_list)
@@ -557,43 +648,52 @@ def pull_from_supabase() -> int:
                     continue
 
                 if op == "UPSERT":
-                    # Si es estancias y localmente tiene dirty=1 sin subir aún, respetar edición local
-                    if tabla == "estancias" and row_data.get("estancia_uuid"):
-                        in_uuid = str(row_data["estancia_uuid"])
-                        in_ts = str(row_data.get("id_timestamp_str") or "").strip()
-                        loc = conn.execute(
-                            "SELECT estancia_uuid, dirty FROM estancias WHERE estancia_uuid = ? OR (id_timestamp_str != '' AND id_timestamp_str = ?)",
-                            (in_uuid, in_ts),
-                        ).fetchone()
-                        if loc and int(loc["dirty"] or 0) == 1:
-                            continue
+                    try:
+                        # Si es estancias y localmente tiene dirty=1 sin subir aún, respetar edición local
+                        if tabla == "estancias" and row_data.get("estancia_uuid"):
+                            in_uuid = str(row_data["estancia_uuid"])
+                            in_ts = str(row_data.get("id_timestamp_str") or "").strip()
+                            loc = conn.execute(
+                                "SELECT estancia_uuid, dirty FROM estancias WHERE estancia_uuid = ? OR (id_timestamp_str != '' AND id_timestamp_str = ?)",
+                                (in_uuid, in_ts),
+                            ).fetchone()
+                            if loc and int(loc["dirty"] or 0) == 1:
+                                continue
 
-                    cols_present = [c for c in valid_cols if c in row_data and row_data[c] is not None]
-                    if not cols_present:
-                        continue
-                    placeholders = ",".join(["?"] * len(cols_present))
-                    cols_sql = ",".join(cols_present)
-                    vals = [row_data[c] for c in cols_present]
-                    conn.execute(
-                        f"INSERT OR REPLACE INTO {tabla} ({cols_sql}) VALUES ({placeholders})",
-                        vals,
-                    )
-                    pulled_count += 1
+                        cols_present = [c for c in valid_cols if c in row_data and row_data[c] is not None]
+                        if not cols_present:
+                            continue
+                        placeholders = ",".join(["?"] * len(cols_present))
+                        cols_sql = ",".join(cols_present)
+                        vals = [
+                            v if not isinstance(v, (dict, list)) else json.dumps(v, ensure_ascii=False)
+                            for v in (row_data[c] for c in cols_present)
+                        ]
+                        conn.execute(
+                            f"INSERT OR REPLACE INTO {tabla} ({cols_sql}) VALUES ({placeholders})",
+                            vals,
+                        )
+                        pulled_count += 1
+                    except sqlite3.Error as row_err:
+                        print(f"[SupabaseSync] Aviso ignorando fila log_id={lid} ({tabla}): {row_err}")
 
                 elif op == "DELETE":
-                    if len(pk_cols) == 1:
-                        v1 = row_data.get(pk_cols[0])
-                        if v1 is not None:
-                            conn.execute(f"DELETE FROM {tabla} WHERE {pk_cols[0]} = ?", (v1,))
-                            pulled_count += 1
-                    else:
-                        v1, v2 = row_data.get(pk_cols[0]), row_data.get(pk_cols[1])
-                        if v1 is not None and v2 is not None:
-                            conn.execute(
-                                f"DELETE FROM {tabla} WHERE {pk_cols[0]} = ? AND {pk_cols[1]} = ?",
-                                (v1, v2),
-                            )
-                            pulled_count += 1
+                    try:
+                        if len(pk_cols) == 1:
+                            v1 = row_data.get(pk_cols[0])
+                            if v1 is not None:
+                                conn.execute(f"DELETE FROM {tabla} WHERE {pk_cols[0]} = ?", (v1,))
+                                pulled_count += 1
+                        else:
+                            v1, v2 = row_data.get(pk_cols[0]), row_data.get(pk_cols[1])
+                            if v1 is not None and v2 is not None:
+                                conn.execute(
+                                    f"DELETE FROM {tabla} WHERE {pk_cols[0]} = ? AND {pk_cols[1]} = ?",
+                                    (v1, v2),
+                                )
+                                pulled_count += 1
+                    except sqlite3.Error as row_err:
+                        print(f"[SupabaseSync] Aviso ignorando DELETE log_id={lid} ({tabla}): {row_err}")
 
             now_iso = datetime.now().isoformat()
             conn.execute(
@@ -918,16 +1018,113 @@ def _reconciliar_ultimos_dias_una_vez() -> None:
         conn.close()
 
 
+def _sincronizar_espejo_wsp_modo_prueba() -> int:
+    """
+    Puente de WhatsApp para el entorno de PRUEBA (8082) entre Laptop 2 y Laptop 1:
+    - Si este equipo tiene mensajes locales de WhatsApp (Laptop 2 leyendo de su operativa local),
+      asegura que estén publicados en las tablas wsp_recepcion_* de Supabase.
+    - Si este equipo no tiene los mensajes locales al día (Laptop 1), los descarga en solo lectura
+      desde Supabase hacia la SQLite de prueba (8082).
+    Jamás modifica estancias, pagos, tienda ni Google Sheets.
+    """
+    if not MODO_PRUEBA:
+        return 0
+    total_movs = 0
+    try:
+        import wsp_inteligencia as wi
+        op_conn = wi._abrir_operativa_ro()
+    except Exception:
+        op_conn = None
+
+    # 1) Si existe base operativa local con mensajes (ej. Laptop 2), subir cualquier mensaje/chat/estado/resumen a Supabase
+    if op_conn is not None:
+        try:
+            cnt_op = op_conn.execute("SELECT COUNT(*) FROM wsp_recepcion_mensajes").fetchone()[0]
+            if cnt_op > 0:
+                headers_post = _headers({"Prefer": "resolution=merge-duplicates,return=minimal"})
+                for tabla, conflict_col in [
+                    ("wsp_recepcion_chats", "jid"),
+                    ("wsp_recepcion_mensajes", "id"),
+                    ("wsp_recepcion_documentos", "id"),
+                    ("wsp_recepcion_estado", "clave"),
+                ]:
+                    try:
+                        rows = [dict(r) for r in op_conn.execute(f"SELECT * FROM {tabla}").fetchall()]
+                        if tabla == "wsp_recepcion_mensajes":
+                            for r in rows:
+                                if not r.get("id") and r.get("id_mensaje"):
+                                    r["id"] = r["id_mensaje"]
+                        if rows:
+                            url = f"{SUPABASE_URL}/rest/v1/{tabla}?on_conflict={conflict_col}"
+                            for i in range(0, len(rows), 150):
+                                chunk = rows[i : i + 150]
+                                req = urllib.request.Request(
+                                    url,
+                                    data=json.dumps(chunk, ensure_ascii=False).encode("utf-8"),
+                                    headers=headers_post,
+                                    method="POST",
+                                )
+                                urllib.request.urlopen(req, timeout=20).close()
+                                total_movs += len(chunk)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            try:
+                op_conn.close()
+            except Exception:
+                pass
+
+    # Si en la SQLite local de prueba hay cortes de wsp_resumen_ejecutivo generados con mensajes reales, compartir el último
+    try:
+        conn_loc = get_connection()
+        try:
+            cnt_msg_loc = conn_loc.execute("SELECT COUNT(*) FROM wsp_recepcion_mensajes").fetchone()[0]
+            if cnt_msg_loc > 0 or op_conn is not None:
+                ult_res = conn_loc.execute(
+                    "SELECT id, fecha_hora, slot_horario, fuente_ia, payload_json FROM wsp_resumen_ejecutivo ORDER BY id DESC LIMIT 3"
+                ).fetchall()
+                rows_res = [dict(r) for r in ult_res if "Sin conversaciones" not in str(r["payload_json"] or "")]
+                if rows_res:
+                    url = f"{SUPABASE_URL}/rest/v1/wsp_resumen_ejecutivo?on_conflict=id"
+                    req = urllib.request.Request(
+                        url,
+                        data=json.dumps(rows_res, ensure_ascii=False).encode("utf-8"),
+                        headers=_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}),
+                        method="POST",
+                    )
+                    urllib.request.urlopen(req, timeout=15).close()
+        finally:
+            conn_loc.close()
+    except Exception:
+        pass
+
+    # 2) Descargar desde Supabase hacia la SQLite local de prueba (para que Laptop 1 vea lo mismo que Laptop 2)
+    res_pull = extraer_datos_reales_supabase_readonly(
+        [
+            "wsp_recepcion_chats",
+            "wsp_recepcion_mensajes",
+            "wsp_recepcion_documentos",
+            "wsp_recepcion_estado",
+            "wsp_resumen_ejecutivo",
+        ]
+    )
+    total_movs += int(res_pull.get("total_filas") or 0)
+    return total_movs
+
+
 def sync_with_supabase() -> Dict[str, Any]:
     """
     Ejecuta un ciclo completo Bidireccional (Push local -> Supabase + Pull Supabase -> local).
     """
-    if MODO_PRUEBA and _SANDBOX:
+    if MODO_PRUEBA:
         if not _sb_lock.acquire(blocking=False):
             return {"status": "BUSY", "pushed": 0, "pulled": 0}
         try:
-            pushed = push_to_supabase()
-            pulled = pull_from_supabase()
+            wsp_movs = _sincronizar_espejo_wsp_modo_prueba()
+            pushed = push_to_supabase() if _SANDBOX else 0
+            pulled = (pull_from_supabase() if _SANDBOX else 0) + wsp_movs
             return {"status": "OK_SANDBOX", "equipo": EQUIPO_ID, "pushed": pushed, "pulled": pulled,
                     "ts": datetime.now().isoformat()}
         except Exception as exc:

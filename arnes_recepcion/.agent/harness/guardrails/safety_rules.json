@@ -1,6 +1,6 @@
 {
   "$schema": "harness_guardrails_v2",
-  "version": "2.2.0",
+  "version": "2.1.0",
   "updated_at": "2026-11-15T08:00:00.000Z",
   "rules": [
     {
@@ -106,15 +106,6 @@
       "trigger": "Sincronización Laptop 2 o Acceso a Datos Financieros Privados",
       "action": "En Laptop 2 (Recepción) el conteo de tablas o archivos de finanzas personales del administrador (Grupo 1) debe ser exactamente cero. La operación diaria de recepción no pide contraseñas, pero cualquier cambio de arquitectura o promoción de código exige autorización.",
       "source": "Reglas Innegociables Hostal 2026"
-    },
-    {
-      "id": "GR-14",
-      "alias": "GR-09 Copiloto Óvalo (Laptop 2)",
-      "name": "Confidencialidad Financiera, Gastos y Credenciales en Copiloto de Recepción",
-      "severity": "BLOCKING",
-      "trigger": "Consulta al Asistente de Recepción (Copiloto Óvalo) sobre claves/accesos, ingresos semanales/mensuales/totales o tabla de gastos",
-      "action": "Bloquear inmediatamente la consulta sin revelar claves SOL SUNAT, contraseñas, tokens, código de Arnés², correos privados, ingresos semanales/mensuales/acumulados (solo se permite el cuadre del día/turno actual) ni registros de la tabla gastos/compras_tienda_lotes. Prohibido abrir modales emergentes solos. Registrar todo intento bloqueado como INTENTO_BLOQUEADO_GR09 en asistente_movimientos_log para el Extracto del Dueño.",
-      "source": "PLAN_ASISTENTE_RECEPCION.md"
     }
   ]
 }

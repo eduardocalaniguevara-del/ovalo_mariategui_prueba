@@ -116,15 +116,6 @@
             "cambiar productos en venta de tienda"
           ],
           "source": "Plan Laptop 2 Recepción"
-        },
-        {
-          "id": "GR-14",
-          "alias": "GR-09 Copiloto Óvalo (Laptop 2)",
-          "name": "Confidencialidad Financiera, Gastos y Credenciales en Copiloto de Recepción",
-          "severity": "BLOCKING",
-          "trigger": "Consulta al Asistente de Recepción (Copiloto Óvalo) sobre claves/accesos, ingresos semanales/mensuales/totales o tabla de gastos",
-          "action": "Bloquear inmediatamente la consulta sin revelar claves SOL SUNAT, contraseñas, tokens, código de Arnés², correos privados, ingresos semanales/mensuales/acumulados (solo se permite el cuadre del día/turno actual) ni registros de la tabla gastos/compras_tienda_lotes. Prohibido abrir modales emergentes solos. Registrar todo intento bloqueado como INTENTO_BLOQUEADO_GR09 en asistente_movimientos_log para el Extracto del Dueño.",
-          "source": "PLAN_ASISTENTE_RECEPCION.md"
         }
       ]
     },

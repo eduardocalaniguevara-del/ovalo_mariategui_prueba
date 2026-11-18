@@ -31,8 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 AQUI = Path(__file__).resolve().parent
-EXCLUIR_DIRS = {".git", "__pycache__", "data", "backups", "respaldos", "node_modules", ".venv", "scratch",
-                "auth_info", "media", ".venv_whisper"}  # nunca pisar la sesión WhatsApp ni los adjuntos de la operativa
+EXCLUIR_DIRS = {".git", "__pycache__", "data", "backups", "respaldos", "node_modules", ".venv", "scratch"}
 EXCLUIR_EXT = {".db", ".db-wal", ".db-shm", ".db-journal", ".log", ".pyc", ".bak", ".flag"}
 EXCLUIR_NOMBRES = {"hotel_perfil.json", "leeme_prueba.txt", "prueba.ico"}
 RESPALDOS = Path(r"C:\Hostal_Sistema\respaldos_promocion")

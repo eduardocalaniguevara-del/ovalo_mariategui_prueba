@@ -256,15 +256,27 @@ def _estado_daemon_raw() -> str:
         for c in conns:
             try:
                 r = c.execute("SELECT valor FROM wsp_recepcion_estado WHERE clave='conexion'").fetchone()
-                if r and r[0] is not None:
+                if r and r[0] is not None and str(r[0]).strip():
                     return str(r[0])
             except Exception:
                 try:
                     r2 = c.execute("SELECT conexion FROM wsp_recepcion_estado LIMIT 1").fetchone()
-                    if r2 and r2[0] is not None:
+                    if r2 and r2[0] is not None and str(r2[0]).strip():
                         return str(r2[0])
                 except Exception:
-                    continue
+                    pass
+            try:
+                r3 = c.execute("SELECT valor FROM estado_sistema WHERE clave='wsp_recepcion_conexion'").fetchone()
+                if r3 and r3[0] is not None and str(r3[0]).strip():
+                    return str(r3[0])
+            except Exception:
+                pass
+            try:
+                cnt = c.execute("SELECT COUNT(*) FROM wsp_recepcion_mensajes").fetchone()
+                if cnt and int(cnt[0] or 0) > 0:
+                    return "CONECTADO"
+            except Exception:
+                pass
     finally:
         for c in conns:
             try:
@@ -1123,11 +1135,22 @@ def _recolectar_chats_clientes() -> List[Dict[str, Any]]:
     conn = op if op is not None else _abrir_local_ro()
     try:
         filas = [dict(r) for r in conn.execute(sql).fetchall()]
-    except Exception:
-        if op is not None:
+        if not filas and op is not None:
             op.close()
+            op = None
             conn = _abrir_local_ro()
             filas = [dict(r) for r in conn.execute(sql).fetchall()]
+    except Exception:
+        if op is not None:
+            try:
+                op.close()
+            except Exception:
+                pass
+            conn = _abrir_local_ro()
+            try:
+                filas = [dict(r) for r in conn.execute(sql).fetchall()]
+            except Exception:
+                filas = []
         else:
             filas = []
     finally:
@@ -1809,6 +1832,23 @@ def obtener_bandeja_wsp(_arg: Any = None) -> Dict[str, Any]:
     reg = _leer_ultimo_corte_db()
     if reg is None:
         return ejecutar_analisis_agente_wsp(forzar=False, slot_horario=f"{date.today().isoformat()} INICIAL")
+    payload = reg.get("payload") or {}
+    sin_items = (
+        not payload.get("pendientes_responder")
+        and not payload.get("recomendaciones_y_notas")
+        and not payload.get("atendidos_y_gracias")
+    )
+    if sin_items:
+        try:
+            c = _abrir_local_ro()
+            try:
+                cnt = int(c.execute("SELECT COUNT(*) FROM wsp_recepcion_mensajes").fetchone()[0] or 0)
+            finally:
+                c.close()
+            if cnt > 0:
+                return ejecutar_analisis_agente_wsp(forzar=True, slot_horario=f"{date.today().isoformat()} AUTO")
+        except Exception:
+            pass
     return _construir_respuesta_bandeja(reg)
 
 
