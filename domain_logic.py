@@ -836,32 +836,53 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
             if r_ep and n_ep:
                 mapa_emp_por_ruc[r_ep] = n_ep
 
-        # Leer pagos Yape/Plin recientes por estancia para mostrar desglose por día (ej. Día 13 S/ 110 + Día 14 S/ 100)
+        # Leer pagos recientes (todos los medios + Yape/Plin por día) por estancia
         mapa_pagos_yape_uuid: Dict[str, List[Dict[str, Any]]] = {}
         mapa_pagos_yape_idts: Dict[str, List[Dict[str, Any]]] = {}
+        mapa_pagos_hist_uuid: Dict[str, List[Dict[str, Any]]] = {}
+        mapa_pagos_hist_idts: Dict[str, List[Dict[str, Any]]] = {}
         for pg in conn.execute(
-            "SELECT estancia_uuid, id_estancia, fecha_iso, monto, medio_pago, nro_operacion FROM pagos ORDER BY rowid DESC LIMIT 1200"
+            "SELECT estancia_uuid, id_estancia, fecha_iso, monto, medio_pago, tipo_pago, concepto, nro_operacion FROM pagos ORDER BY rowid DESC LIMIT 2000"
         ).fetchall():
-            med_pg = str(pg["medio_pago"] or "").lower()
-            if "yape" not in med_pg and "plin" not in med_pg and "elec" not in med_pg:
-                continue
             m_pg = round(float(pg["monto"] or 0), 2)
-            if m_pg <= 0:
+            if abs(m_pg) < 0.01:
                 continue
             f_iso = str(pg["fecha_iso"] or "").strip()
             f_dia = normalizar_fecha_dmy(f_iso.split(" ")[0]) if f_iso else ""
-            item_pg = {
+            med_raw = str(pg["medio_pago"] or "").strip()
+            med_pg = med_raw.lower()
+            op_pg = str(pg["nro_operacion"] or "").strip()
+            u_pg = str(pg["estancia_uuid"] or "").strip()
+            id_pg = str(pg["id_estancia"] or "").strip()
+            id_pg_canon = _canon_ts_busq(id_pg) if id_pg else ""
+
+            item_hist = {
                 "fecha": f_dia or f_iso[:10],
                 "fechaHora": f_iso,
                 "monto": m_pg,
-                "op": str(pg["nro_operacion"] or "").strip(),
+                "medio": med_raw or "Efectivo",
+                "tipo": str(pg["tipo_pago"] or "").strip(),
+                "concepto": str(pg["concepto"] or "").strip(),
+                "op": op_pg,
             }
-            u_pg = str(pg["estancia_uuid"] or "").strip()
-            id_pg = str(pg["id_estancia"] or "").strip()
             if u_pg:
-                mapa_pagos_yape_uuid.setdefault(u_pg, []).append(item_pg)
-            if id_pg:
-                mapa_pagos_yape_idts.setdefault(id_pg, []).append(item_pg)
+                mapa_pagos_hist_uuid.setdefault(u_pg, []).append(item_hist)
+            if id_pg_canon:
+                mapa_pagos_hist_idts.setdefault(id_pg_canon, []).append(item_hist)
+
+            if m_pg > 0 and ("yape" in med_pg or "plin" in med_pg or "elec" in med_pg):
+                item_pg = {
+                    "fecha": f_dia or f_iso[:10],
+                    "fechaHora": f_iso,
+                    "monto": m_pg,
+                    "op": op_pg,
+                }
+                if u_pg:
+                    mapa_pagos_yape_uuid.setdefault(u_pg, []).append(item_pg)
+                if id_pg:
+                    mapa_pagos_yape_idts.setdefault(id_pg, []).append(item_pg)
+                if id_pg_canon and id_pg_canon != id_pg:
+                    mapa_pagos_yape_idts.setdefault(id_pg_canon, []).append(item_pg)
 
         estancias_cache: List[Dict[str, Any]] = []
         mapa_bd_por_fecha: Dict[str, Dict[str, Any]] = {}
@@ -929,9 +950,16 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
             # Regla de Envío WSP: solo el celular anotado en ESTA estancia define si pidió envío de Boleta/Factura (Naranja Intenso vs Amarillo)
             cel_val = str(r["celular"] or "").strip()
             cel_contacto = cel_val or mapa_celular_dni.get(dni_norm, "")
+            id_ts_canon = _canon_ts_busq(r["id_timestamp_str"] or "")
             pagos_yape_est = list(reversed(
                 mapa_pagos_yape_uuid.get(str(r["estancia_uuid"] or "").strip())
                 or mapa_pagos_yape_idts.get(str(r["id_timestamp_str"] or "").strip())
+                or mapa_pagos_yape_idts.get(id_ts_canon)
+                or []
+            ))
+            pagos_hist_est = list(reversed(
+                mapa_pagos_hist_uuid.get(str(r["estancia_uuid"] or "").strip())
+                or mapa_pagos_hist_idts.get(id_ts_canon)
                 or []
             ))
             suma_yape_reg = round(sum(float(x.get("monto") or 0) for x in pagos_yape_est), 2)
@@ -971,6 +999,7 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
                 "celular": cel_val,
                 "celularContacto": cel_contacto,
                 "pagosYapePorDia": pagos_yape_est,
+                "pagosHistorial": pagos_hist_est,
                 "noches": noches_calc,
                 "tarifa": tarifa,
                 "subtotalAloj": subtotal_aloj,
@@ -1186,7 +1215,9 @@ def obtener_datos_panel_local(fecha_override: Optional[str] = None) -> Dict[str,
                         "yape": float(st["pagoYape"] or 0),
                         "visa": float(st["pagoVisa"] or 0),
                         "codigoMontoHora": st["codigoMontoHora"] or "",
+                        "historial": st.get("pagosHistorial") or [],
                     },
+                    "pagosHistorial": st.get("pagosHistorial") or [],
                     "adicional": total_adic,
                     "adicSnacksCargado": snacks_carg,
                     "adicServicios": serv_carg,

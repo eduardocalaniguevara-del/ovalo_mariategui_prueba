@@ -170,11 +170,17 @@ def pull_from_sheets(full_bootstrap: bool = False) -> Dict[str, Any]:
             "config", "disp_top", "panel", "col_a_bd", "col_t", "col_pg", "col_g"
         ]
         if "SUNAT_OCT" in tabs:
-            ranges_step1.append("'SUNAT_OCT'!A2:M800")
-            keys_step1.append("sunat")
+            ranges_step1.append("'SUNAT_OCT'!A2:M1500")
+            keys_step1.append("sunat_oct")
+        if "SUNAT_NOV" in tabs:
+            ranges_step1.append("'SUNAT_NOV'!A2:M1500")
+            keys_step1.append("sunat_nov")
         if "CALZADO_OCT" in tabs:
-            ranges_step1.append("'CALZADO_OCT'!A2:V800")
-            keys_step1.append("calzado")
+            ranges_step1.append("'CALZADO_OCT'!A2:V1500")
+            keys_step1.append("calzado_oct")
+        if "CALZADO_NOV" in tabs:
+            ranges_step1.append("'CALZADO_NOV'!A2:V1500")
+            keys_step1.append("calzado_nov")
         if "Vitrina_Tienda" in tabs:
             ranges_step1.append("'Vitrina_Tienda'!A2:DZ45")
             keys_step1.append("vitrina")
@@ -209,8 +215,10 @@ def pull_from_sheets(full_bootstrap: bool = False) -> Dict[str, Any]:
         raw_caja = disp_top[0][3] if (disp_top and len(disp_top[0]) >= 4) else "0.00"
         caja_g1 = f"{parse_moneda(raw_caja):.2f}"
         panel_rows = step1_dict.get("panel", [])
-        sunat_rows = step1_dict.get("sunat", [])
-        calzado_rows = step1_dict.get("calzado", [])
+        sunat_oct_rows = step1_dict.get("sunat_oct", [])
+        sunat_nov_rows = step1_dict.get("sunat_nov", [])
+        calzado_oct_rows = step1_dict.get("calzado_oct", [])
+        calzado_nov_rows = step1_dict.get("calzado_nov", [])
 
         col_a_bd = step1_dict.get("col_a_bd", [])
         col_t = step1_dict.get("col_t", [])
@@ -729,16 +737,89 @@ def pull_from_sheets(full_bootstrap: bool = False) -> Dict[str, Any]:
                         elif ck_old in canon_hist_row and ck_old not in canon_hist_dup and int(old_r["sheet_row"] or 0) != canon_hist_row[ck_old]:
                             conn.execute("UPDATE estancias SET sheet_row = ? WHERE estancia_uuid = ?", (canon_hist_row[ck_old], old_r["estancia_uuid"]))
 
-            # Actualizar SUNAT_OCT y CALZADO_OCT
-            if sunat_rows:
-                conn.execute("DELETE FROM sunat_lineas_cache")
-                for s in sunat_rows:
-                    def _gs(idx_s: int) -> str:
-                        return str(s[idx_s]).strip() if len(s) > idx_s and s[idx_s] is not None else ""
-                    nro_cp = _gs(4).upper()
-                    hab_s = _gs(1).upper()
-                    if not nro_cp and not hab_s:
-                        continue
+            # Actualizar SUNAT_OCT + SUNAT_NOV y CALZADO_OCT + CALZADO_NOV por mes (Punto 4.C):
+            # - Reemplaza únicamente el mes presente en el lote sin borrar el otro mes.
+            # - Evita duplicar los CPEs puente (noches de Octubre facturadas en Noviembre presentes en ambas pestañas),
+            #   dando prioridad canónica a SUNAT_NOV cuando viene poblada.
+            # - Preserva CPEs locales de Noviembre recién emitidos en SQLite que aún no estén en la hoja.
+            def _insertar_fila_sunat_cache(s_row_vals: List[Any]) -> None:
+                def _gs(idx_s: int) -> str:
+                    return str(s_row_vals[idx_s]).strip() if len(s_row_vals) > idx_s and s_row_vals[idx_s] is not None else ""
+                nro_cp_s = _gs(4).upper()
+                hab_s = _gs(1).upper()
+                if not nro_cp_s and not hab_s:
+                    return
+                conn.execute(
+                    """
+                    INSERT INTO sunat_lineas_cache (
+                        nro_cp, tipo, noche_dmy, hab, monto_linea, total_cp,
+                        cliente, doc, fecha_emision, estado, descripcion
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        nro_cp_s,
+                        (_gs(3) or "BOLETA").upper(),
+                        normalizar_fecha_dmy(_gs(0)),
+                        hab_s,
+                        parse_moneda(_gs(2)),
+                        parse_moneda(_gs(9)),
+                        re.sub(r"^-\s*", "", _gs(5)).strip(),
+                        _gs(6),
+                        normalizar_fecha_dmy(_gs(7)),
+                        (_gs(8) or "VIGENTE").upper(),
+                        _gs(11),
+                    ),
+                )
+
+            cps_nov_sheet = {
+                str(r[4]).strip().upper()
+                for r in sunat_nov_rows
+                if len(r) > 4 and str(r[4] or "").strip()
+            }
+            cps_oct_sheet = {
+                str(r[4]).strip().upper()
+                for r in sunat_oct_rows
+                if len(r) > 4 and str(r[4] or "").strip()
+            }
+
+            if sunat_oct_rows:
+                conn.execute(
+                    "DELETE FROM sunat_lineas_cache WHERE fecha_emision LIKE '%/10/2026' "
+                    "OR (COALESCE(fecha_emision, '') = '' AND noche_dmy LIKE '%/10/2026')"
+                )
+                if not sunat_nov_rows and cps_oct_sheet:
+                    ph_oct = ",".join("?" for _ in cps_oct_sheet)
+                    conn.execute(f"DELETE FROM sunat_lineas_cache WHERE nro_cp IN ({ph_oct})", tuple(cps_oct_sheet))
+                for s_oct in sunat_oct_rows:
+                    cp_cand = str(s_oct[4]).strip().upper() if len(s_oct) > 4 and s_oct[4] is not None else ""
+                    if sunat_nov_rows and cp_cand and cp_cand in cps_nov_sheet:
+                        continue  # Se carga una sola vez desde SUNAT_NOV (canónica para Noviembre)
+                    _insertar_fila_sunat_cache(s_oct)
+
+            if sunat_nov_rows:
+                extra_nov_locales = [
+                    tuple(r)
+                    for r in conn.execute(
+                        """
+                        SELECT nro_cp, tipo, noche_dmy, hab, monto_linea, total_cp,
+                               cliente, doc, fecha_emision, estado, descripcion
+                        FROM sunat_lineas_cache
+                        WHERE fecha_emision LIKE '%/11/2026'
+                        """
+                    ).fetchall()
+                    if str(r[0] or "").strip().upper() not in cps_nov_sheet
+                    and str(r[0] or "").strip().upper() not in cps_oct_sheet
+                ]
+                conn.execute(
+                    "DELETE FROM sunat_lineas_cache WHERE fecha_emision LIKE '%/11/2026' "
+                    "OR (COALESCE(fecha_emision, '') = '' AND noche_dmy LIKE '%/11/2026')"
+                )
+                if cps_nov_sheet:
+                    ph_nov = ",".join("?" for _ in cps_nov_sheet)
+                    conn.execute(f"DELETE FROM sunat_lineas_cache WHERE nro_cp IN ({ph_nov})", tuple(cps_nov_sheet))
+                for s_nov in sunat_nov_rows:
+                    _insertar_fila_sunat_cache(s_nov)
+                for r_ext in extra_nov_locales:
                     conn.execute(
                         """
                         INSERT INTO sunat_lineas_cache (
@@ -746,24 +827,11 @@ def pull_from_sheets(full_bootstrap: bool = False) -> Dict[str, Any]:
                             cliente, doc, fecha_emision, estado, descripcion
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (
-                            nro_cp,
-                            (_gs(3) or "BOLETA").upper(),
-                            normalizar_fecha_dmy(_gs(0)),
-                            hab_s,
-                            parse_moneda(_gs(2)),
-                            parse_moneda(_gs(9)),
-                            re.sub(r"^-\s*", "", _gs(5)).strip(),
-                            _gs(6),
-                            normalizar_fecha_dmy(_gs(7)),
-                            (_gs(8) or "VIGENTE").upper(),
-                            _gs(11),
-                        ),
+                        r_ext,
                     )
 
-            if calzado_rows:
-                conn.execute("DELETE FROM calzado_cache")
-                for idx_cal, c in enumerate(calzado_rows):
+            def _insertar_lote_calzado(lote_cal: List[List[Any]], mes_tag: str) -> None:
+                for idx_cal, c in enumerate(lote_cal):
                     def _gc(idx_c: int) -> str:
                         return str(c[idx_c]).strip() if len(c) > idx_c and c[idx_c] is not None else ""
                     noche_c = normalizar_fecha_dmy(_gc(1))
@@ -771,7 +839,8 @@ def pull_from_sheets(full_bootstrap: bool = False) -> Dict[str, Any]:
                     fila_est = _gc(5).upper()
                     if not noche_c and not fila_est:
                         continue
-                    clave_cal = fila_est if fila_est else f"{noche_c}|{hab_c}|{idx_cal}"
+                    es_fila_real = fila_est.startswith("E") and fila_est[1:].isdigit()
+                    clave_cal = fila_est if es_fila_real else f"{mes_tag}|{noche_c}|{hab_c}|{fila_est}|{idx_cal}"
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO calzado_cache (
@@ -800,6 +869,32 @@ def pull_from_sheets(full_bootstrap: bool = False) -> Dict[str, Any]:
                             _gc(21),
                         ),
                     )
+
+            if calzado_oct_rows:
+                conn.execute(
+                    """
+                    DELETE FROM calzado_cache
+                    WHERE (noche_dmy LIKE '%/10/2026' AND COALESCE(fila_est, '') != 'MES_ANTERIOR_OCT')
+                       OR fila_est = 'MES_ANTERIOR_SEP'
+                       OR clave_calzado LIKE 'OCT|%'
+                       OR clave_calzado IN ('SIN_FILA', 'MES_ANTERIOR_SEP')
+                    """
+                )
+                _insertar_lote_calzado(calzado_oct_rows, "OCT")
+
+            if calzado_nov_rows:
+                conn.execute(
+                    """
+                    DELETE FROM calzado_cache
+                    WHERE noche_dmy LIKE '%/11/2026'
+                       OR fila_est = 'MES_ANTERIOR_OCT'
+                       OR clave_calzado LIKE 'NOV|%'
+                       OR clave_calzado = 'MES_ANTERIOR_OCT'
+                    """
+                )
+                if not calzado_oct_rows:
+                    conn.execute("DELETE FROM calzado_cache WHERE clave_calzado = 'SIN_FILA'")
+                _insertar_lote_calzado(calzado_nov_rows, "NOV")
 
             # Actualizar Tienda y Pagos en espejo 1:1 con Sheets (respetando locales synced=0)
             pend_tienda_ops = conn.execute(

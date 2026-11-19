@@ -28,6 +28,12 @@
   }
 
   function _obtenerHabObj(habNum) {
+    if (
+      window._estanciaFacturacionActiva &&
+      (!habNum || String(window._estanciaFacturacionActiva.hab) === String(habNum))
+    ) {
+      return window._estanciaFacturacionActiva;
+    }
     const lista = window.habitacionesData || [];
     return lista.find((x) => String(x.hab) === String(habNum)) || null;
   }
@@ -1059,8 +1065,8 @@
       {
         accion: accion,
         hab: h.hab,
-        estanciaUuid: h.estanciaUuid || f.estanciaUuid || "",
-        id_estancia: f.filaNum || h.filaNum || 0,
+        estanciaUuid: h.estanciaUuid || h.estancia_uuid || h.uuid || f.estanciaUuid || f.estancia_uuid || "",
+        id_estancia: f.filaNum || h.filaNum || h.fila || 0,
         fila_calzado: f.filaCalzado || null,
         tipo: esFact ? "FACTURA" : "BOLETA",
         documento: esFact ? ruc : chkDni.dniNormalizado,
@@ -1277,6 +1283,15 @@
         window.recargarDatos();
       } else if (cambioMapa && typeof window.renderTabla === "function") {
         window.renderTabla();
+      }
+      if (requiereRecargaPanel && typeof window.cargarVistaContabilidad === "function") {
+        const vistaContab = document.getElementById("vistaContabilidad");
+        if (
+          (vistaContab && !vistaContab.classList.contains("hidden")) ||
+          (window.CONTABILIDAD_GLOBAL_STATE && window.CONTABILIDAD_GLOBAL_STATE.data)
+        ) {
+          window.cargarVistaContabilidad();
+        }
       }
 
       _actualizarTrackerFlotante(jobs);

@@ -136,6 +136,18 @@ HOJA_PRUEBA_HABILITADA = bool(
 )
 if MODO_PRUEBA:
     os.environ["OVALO_ENTORNO"] = "prueba"
+
+# Decisión arquitectónica del creador (Punto 4.C - 19/11/2026):
+# En modo OPERATIVO (:8080), la hoja 2026_Hostal Óvalo es EXCLUSIVAMENTE DE RESPALDO (salida vía process_sync_queue).
+# La WebApp operativa NO descarga periódicamente desde la hoja (pull_from_sheets desactivado en ciclo normal),
+# salvo bootstrap inicial si la SQLite estuviera vacía.
+HOJA_OPERATIVA_SOLO_RESPALDO = bool(PERFIL_HOTEL.get("hoja_operativa_solo_respaldo", True)) and (not MODO_PRUEBA)
+
+# Flag exclusivo para simular y auditar en PRUEBA (:8082) la omisión periódica de pull_from_sheets:
+HOJA_SOLO_RESPALDO_SIMULAR = bool(
+    PERFIL_HOTEL.get("hoja_solo_respaldo_simular", False)
+    or os.environ.get("OVALO_SIMULAR_SOLO_RESPALDO", "").strip().lower() in ("1", "true", "yes")
+) and MODO_PRUEBA
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",

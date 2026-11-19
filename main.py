@@ -6,6 +6,9 @@ Puerto: http://127.0.0.1:8080
 """
 
 from contextlib import asynccontextmanager
+from datetime import datetime
+import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -23,7 +26,18 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import APP_HOST, APP_PORT, HOJA_PRUEBA_HABILITADA, MODO_PRUEBA, STATIC_DIR, SYNC_INTERVAL_SECONDS, NOMBRE_HOTEL
+from config import (
+    APP_HOST,
+    APP_PORT,
+    HOJA_OPERATIVA_SOLO_RESPALDO,
+    HOJA_PRUEBA_HABILITADA,
+    HOJA_SOLO_RESPALDO_SIMULAR,
+    MODO_PRUEBA,
+    NOMBRE_HOTEL,
+    PERFIL_HOTEL_PATH,
+    STATIC_DIR,
+    SYNC_INTERVAL_SECONDS,
+)
 from database import get_connection, init_db
 import tablet_manager as tm
 import yape_manager as ym
@@ -96,18 +110,58 @@ def _is_bootstrap_completed() -> bool:
         conn.close()
 
 
+def _debe_simular_solo_respaldo_en_prueba() -> bool:
+    if HOJA_SOLO_RESPALDO_SIMULAR:
+        return True
+    if os.environ.get("OVALO_SIMULAR_SOLO_RESPALDO", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if PERFIL_HOTEL_PATH.exists():
+        try:
+            datos_p = json.loads(PERFIL_HOTEL_PATH.read_text(encoding="utf-8-sig"))
+            if isinstance(datos_p, dict) and bool(datos_p.get("hoja_solo_respaldo_simular", False)):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _marcar_pulso_sin_pull(motivo: str) -> None:
+    ahora = datetime.now()
+    conn = get_connection()
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO estado_sistema (clave, valor, updated_at) VALUES (?, ?, ?)",
+            [
+                ("network_online", "1", ahora.isoformat()),
+                ("last_sync_ts", ahora.strftime("%H:%M:%S"), ahora.isoformat()),
+                ("last_successful_pull_iso", ahora.isoformat(), ahora.isoformat()),
+                ("offline_since_iso", "", ahora.isoformat()),
+                ("last_pull_skipped_reason", motivo, ahora.isoformat()),
+            ],
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 def _run_sync_cycle(force_full: bool = False) -> None:
     if MODO_PRUEBA:
         # Decisión D3 (18/11/2026): En modo prueba NUNCA llamar a sync_with_supabase().
-        # Con HOJA_PRUEBA_HABILITADA sincroniza bidireccionalmente contra 2026_Prueba_Ovalo (1VXg1d8Q...).
+        # Con HOJA_PRUEBA_HABILITADA sincroniza bidireccionalmente contra 2026_Prueba_Ovalo (1VXg1d8Q...),
+        # salvo cuando se activa hoja_solo_respaldo_simular para auditar el comportamiento de Punto 4.C.
         if not HOJA_PRUEBA_HABILITADA:
             return
         if not _sync_lock.acquire(blocking=False):
             return
         try:
-            process_sync_queue()
+            res_qp = process_sync_queue()
             boot_done = _is_bootstrap_completed()
-            pull_from_sheets(full_bootstrap=(force_full or not boot_done))
+            if force_full or (not boot_done) or (not _debe_simular_solo_respaldo_en_prueba()):
+                pull_from_sheets(full_bootstrap=(force_full or not boot_done))
+            elif (res_qp or {}).get("status") != "ERROR":
+                _marcar_pulso_sin_pull("SIMULACION_SOLO_RESPALDO_PRUEBA")
         except Exception as exc:
             print(f"[SyncWorker][PRUEBA] Advertencia en ciclo con Hoja de Prueba: {exc}")
         finally:
@@ -117,14 +171,17 @@ def _run_sync_cycle(force_full: bool = False) -> None:
         return
     try:
         # 0. Sincronización ultrarrápida (< 150 ms) con Supabase (Grupo 2: ovalo_sistema.db <-> hostal-ovalo)
-        sync_with_supabase()
-        # 1. Subir primero cualquier operación pendiente en la cola local (FIFO idempotente) a Google Sheets
-        process_sync_queue()
-        # 2. Descargar novedades desde Google Sheets (sin pisar filas dirty=1)
+        res_sb = sync_with_supabase()
+        # 1. Subir operaciones pendientes en la cola local (FIFO idempotente) a 2026_Hostal Óvalo como RESPALDO DE SALIDA
+        res_q = process_sync_queue()
+        # 2. Punto 4.C: Con HOJA_OPERATIVA_SOLO_RESPALDO=True y SQLite ya inicializada (boot_done=True),
+        #    JAMÁS ejecutar pull_from_sheets() en el ciclo periódico de 25s (la hoja operativa es 100% respaldo).
         boot_done = _is_bootstrap_completed()
-        pull_from_sheets(full_bootstrap=(force_full or not boot_done))
-        # 3. Subir a Supabase cualquier novedad recién traída desde Google Sheets
-        sync_with_supabase()
+        if force_full or (not boot_done) or (not HOJA_OPERATIVA_SOLO_RESPALDO):
+            pull_from_sheets(full_bootstrap=(force_full or not boot_done))
+            sync_with_supabase()
+        elif (res_sb or {}).get("status") != "ERROR" and (res_q or {}).get("status") != "ERROR":
+            _marcar_pulso_sin_pull("HOJA_OPERATIVA_SOLO_RESPALDO")
     except Exception as exc:
         print(f"[SyncWorker] Advertencia en ciclo de sincronización: {exc}")
     finally:

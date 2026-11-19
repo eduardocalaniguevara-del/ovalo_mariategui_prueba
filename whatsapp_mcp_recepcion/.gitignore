@@ -1,0 +1,26 @@
+# Exclusiones de seguridad para whatsapp_mcp_recepcion (Punto 6.A)
+node_modules/
+__pycache__/
+*.py[cod]
+auth_info/
+auth_info*/
+.wwebjs_auth*/
+.wwebjs_cache*/
+baileys_auth*/
+session*/
+media/
+qr*.png
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.log
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+.env
+*.env
+*credentials*
+*credenciales*
+*secret*

@@ -148,31 +148,31 @@ Porque en nuestra WebApp Local (`estancias` y `huespedes_padron`) tenemos la cas
   - Extractor Maelen BCP (49 movimientos históricos, 23 del mes), Vigilante WhatsApp +5m y Agente Revisor 08:30 AM con regla Cero Omisiones activos.
   - Vitrina Tienda con 36 turnos históricos (`h1..h36`), encabezados completos (N° conteo, responsable, fecha y hora) y columnas fijas de `145px` sin letras cortadas.
 
-### G. Optimización Definitiva de Supabase y Entorno de Prueba 100% Local (`2026-11-17 / 2026-11-18` — Commits `3f74e18`..actual):
+### G. Optimización Definitiva de Supabase y Arquitectura de Entornos Prueba vs Operativo (`2026-11-17 / 2026-11-19` — Vigente):
 - **¿Por qué se hizo?**
   1. **Consumo de Egress Bandwidth en Supabase (`> 5.5 GB`):** El entorno de pruebas (`Ovalo_Mariategui_PRUEBA`, puerto `8082`) estaba subiendo y descargando continuamente en `sandbox_change_log` (`140,074 filas` / `73 MB`) cada vez que corría el conciliador de Yape (`yape_conciliacion_hostal`) y `calzado_cache`.
   2. **Bucle de descarga en Laptop 2 (`log_id=30931`):** La Laptop 2 estaba detenida en el cursor `30931` desde el `14/11/2026` porque unas filas intermedias en `supabase_change_log` (`hostal_documentos_ocr` con columna `procesado_en` y colisiones de `id_timestamp_str` en `estancias`) lanzaban excepción SQLite, haciendo `rollback` del lote de 500 filas y volviendo a descargar las mismas 500 filas cada 25 segundos (~1.2 GB/día).
   3. **Esquema antiguo de `yape_conciliacion_hostal` en Supabase:** La tabla en Supabase tenía las columnas antiguas (`fecha_hora_banco`, `origen_destino`) mientras SQLite usaba las nuevas (`fecha_operacion`, `hora_operacion`, `remitente_bcp`, `monto_bcp`), provocando avisos `HTTP 400`.
-- **¿Qué se hizo exactamente (en Supabase, en Prueba `8082` y promovido a Operativa `8080`)?**
-  1. **`Ovalo_Mariategui_PRUEBA` (`8082`) ahora es 100% LOCAL (Cero Supabase):**
-     - En `config.py`, `instalar_arnes_laptop2.py` y `data/hotel_perfil.json` se fijó `"conectar_pruebas_supabase": false` y en `supabase_sync.py` se fijó `_SANDBOX = False`.
-     - En Supabase se vació `sandbox_change_log` (`0 filas` / `0 KB`) y se instaló el trigger `trg_discard_sandbox_log` (`RETURN NULL`) para que jamás vuelva a acumular datos de prueba en la nube.
-     - Toda edición o prueba en `C:\ovalo_mariategui_prueba` ocurre 100% en el disco duro local de la laptop y luego se pasa a la operativa (`C:\Recepcion_Ovalo_Local` o `app_local_recepcion`) con `Promover_a_Operativa.bat` (`promover_a_operativa.py`).
-  2. **Destrabe Total del Cursor y Filtro Anti-Rebote en `pull_from_supabase()` (`supabase_sync.py`):**
-     - Cada fila individual descargada desde `supabase_change_log` ahora se ejecuta dentro de su propio bloque `try...except sqlite3.Error`, de modo que si una fila aislada tiene una diferencia de esquema o índice, se ignora esa fila puntual sin abortar las otras 499 y el cursor `sb_last_log_id` avanza siempre.
-     - Se excluyeron de `supabase_change_log` las 3 tablas de caché recalculables (`TABLAS_SOLO_LOCAL_CACHE = {"yape_conciliacion_hostal", "calzado_cache", "sunat_lineas_cache"}`) tanto en Python como en la función `fn_log_hostal_change()` de Postgres.
-     - Se alinearon las columnas de `yape_conciliacion_hostal` en Supabase (`HTTP 200 OK`).
-  3. **Autolimpieza Nocturna 03:00 AM (`autolimpieza_bitacora_supabase_3am` en `scheduler_recepcion_24x7.py`):**
-     - Cada madrugada a las `03:00 AM` invoca la función RPC `purgar_bitacoras_transito(p_keep_log_id)` en Supabase.
-     - **Seguridad Total de Datos:** Esta limpieza borra **SOLO** los "sobres de aviso" viejos de la tabla de mensajería `supabase_change_log` que **ambas laptops ya leyeron y guardaron**. **JAMÁS toca ni borra** las 33 tablas operativas reales de Supabase ni el archivo `ovalo_sistema.db` (SQLite) de ninguna de las dos laptops.
+- **Arquitectura Definitiva Vigente (`2026-11-19`):**
+  1. **Entorno de Prueba (`:8082` — `C:\ovalo_mariategui_prueba`):**
+     - **Vinculación Bidireccional a Hoja de Prueba Real:** Conectado a la hoja de Google Sheets `2026_Prueba_Ovalo` (`1VXg1d8QQgS2te1NWlSFbK6Y4fqLV5B-kNwJ-mezRoqE`) con `HOJA_PRUEBA_HABILITADA = True` y **doble candado anti-ID operativo** en `config.py` (rechaza en código duro los IDs operativos de Óvalo y Terrazas).
+     - **Supabase 100% Apagado en Prueba:** `SUPABASE_ENABLED = False`, `"conectar_pruebas_supabase": false`, `_SANDBOX = False` y `_sincronizar_espejo_wsp_modo_prueba` desactivado (`_supabase_outbox = 0`, `0` triggers `trg_sb_*` en la base de prueba). En Supabase se vació `sandbox_change_log` (`0 filas`) y se instaló el trigger `trg_discard_sandbox_log` (`RETURN NULL`).
+     - **Scripts CLI en Modo Prueba (`OVALO_ENTORNO=prueba` via `hoja_activa.py`):** Apuntan automáticamente a la hoja `2026_Prueba_Ovalo` y a `C:\ovalo_mariategui_prueba\data\ovalo_sistema.db`. En SUNAT (`emitir_comprobante_sunat.py`, `emitir_nota_credito_sunat.py`, `emitir_y_enviar.py`) corren hasta la **Vista Preliminar Real (Borrador con captura `.png`)** sin hacer clic en el botón final de emisión legal y sin enviar WhatsApp a clientes reales.
+  2. **Entorno Operativo (`:8080` — `C:\Recepcion_Ovalo_Local`):**
+     - **SQLite + Supabase (`fmlfqupwscymosvwnnzx`) como ÚNICA Fuente de Verdad entre Laptop 1 y Laptop 2:** Los scripts CLI en Laptop 2 (`registrar_emision_sistema.py`, `Construir_SUNAT_NOV/OCT.py`, `Calzar_Noviembre/Octubre.py`, `auditor_yape.py`, `conciliar_con_criterio.py`) escriben directamente en `C:\Recepcion_Ovalo_Local\data\ovalo_sistema.db` (`conectar_sqlite_activa()` con `WAL` y `busy_timeout=20000`), propagándose a Laptop 1 por triggers SQLite + Supabase (`sunat_ventas`, `estancias`) y limpiando en la misma transacción `_supabase_outbox` para las 3 tablas de caché local (`limpiar_outbox_caches_locales()`).
+     - **Hoja Operativa `2026_Hostal Óvalo` (`1KudqxM1D6MSCxT5Zb2_vAOTGxnw9Ja92JuFjFpDuxZ8`) 100% como Respaldo de Salida:** Con `HOJA_OPERATIVA_SOLO_RESPALDO = True` en `config.py` y `sync_engine.py`, el ciclo periódico de 25 segundos ya **no ejecuta `pull_from_sheets()`** en Operativa (evitando que Google Sheets pise SQLite o regenere cachés de un solo mes), manteniendo activo `process_sync_queue()` para exportar cambios locales hacia Google Sheets como respaldo espejo.
+  3. **Destrabe Total del Cursor, Filtro Anti-Rebote y Autolimpieza Nocturna 03:00 AM:**
+     - En `pull_from_supabase()` (`supabase_sync.py`), cada fila de `supabase_change_log` se procesa en su propio bloque `try...except sqlite3.Error` para que ninguna fila aislada detenga el cursor `sb_last_log_id`.
+     - Se excluyeron de `supabase_change_log` las 3 tablas de caché recalculables (`TABLAS_SOLO_LOCAL_CACHE = {"yape_conciliacion_hostal", "calzado_cache", "sunat_lineas_cache"}`) tanto en Python como en `fn_log_hostal_change()` de Postgres.
+     - Cada madrugada a las `03:00 AM`, `autolimpieza_bitacora_supabase_3am` (`scheduler_recepcion_24x7.py`) invoca `purgar_bitacoras_transito(p_keep_log_id)` borrando únicamente avisos antiguos de `supabase_change_log` ya leídos por ambas laptops (sin tocar jamás las tablas operativas reales ni `ovalo_sistema.db`).
 
 ---
 
-## 🤖 7. PLAN PENDIENTE DE EJECUCIÓN EN LAPTOP 2: ASISTENTE DE RECEPCIÓN ("COPILOTO ÓVALO") + CONTROL ARNÉS² `GR-09` [2026-11-14]
+## 🤖 7. PROYECTO ARCHIVADO / INDEPENDIENTE: ASISTENTE DE RECEPCIÓN ("COPILOTO ÓVALO") + CONTROL ARNÉS² `GR-09` / `GR-14` [2026-11-14 / 2026-11-17]
 
-> **Archivo detallado del Plan:** `PLAN_ASISTENTE_RECEPCION.md` (ubicado en esta misma carpeta `leemeantrigravityrecepcion` y en `Downloads\PLAN_ASISTENTE_RECEPCION.md`).
+> **Archivo detallado del Plan y Código:** Conservado íntegramente en `C:\Hostal_Sistema\proyecto_asistente_recepcion\` (`asistente_recepcion.py`, `PLAN_ASISTENTE_RECEPCION.md`, `LEEME_PROYECTO_ASISTENTE.md`, `guia_asistente/*.png`) y en `Downloads\PLAN_ASISTENTE_RECEPCION.md`. Retirado de la barra principal de `PanelDisponibilidad.html` para mantener la vista operativa limpia y enfocada en el Resumen Ejecutivo de WhatsApp.
 
-### A. Qué debe hacer el Asistente en `Ovalo_Mariategui_PRUEBA` (`puerto 8082`):
+### A. Capacidades preservadas en `asistente_recepcion.py`:
 1. **Consultor Operativo Instantáneo (4 Frentes):**
    - **Deudas de Habitación y Yapes del Día:** Desglose exacto de cuentas (`estancias`, `pagos`, `ventas_tienda`, `servicios_detalle`) y Yapes recibidos hoy (`yape_conciliacion_hostal` + `cache_correo_maelen_bcp.json`).
    - **WhatsApp de Recepción (Comprobantes Pendientes):** Responde qué facturas o boletas pedidas por WhatsApp (`wsp_recepcion_mensajes`, `wsp_recepcion_documentos`) o en estancias (`solicita_comp = 'Sí'`, `estado_comp != 'Emitido'`) están pendientes de emitir o enviar (`wsp_recepcion_cola_envio`).
@@ -182,53 +182,41 @@ Porque en nuestra WebApp Local (`estancias` y `huespedes_padron`) tenemos la cas
    - **Modalidad 1 — Guía Visual con Fotos Reales (`📸 Muéstrame con fotos`):** Muestra tarjetas paso a paso con capturas reales de la aplicación (`/static/img/guia_asistente/*.png`) con flechas y numeración (`①`, `②`, `③`) indicando dónde hacer clic.
    - **Modalidad 2 — Ejecución Directa por el Asistente (`⚡ Hazlo tú por mí`) + Extracto para el Dueño:** El recepcionista le pide hacer el movimiento (ej. cambio de habitación, venta de tienda, pago posterior, continuar estancia), confirma con 1 clic en el mismo chat (`✅ Confirmar`), el asistente ejecuta la función oficial de `domain_logic.py` y **guarda obligatoriamente el registro Antes/Después en `asistente_movimientos_log` para el Extracto del Dueño**.
 
-### B. Cortafuegos Arnés² `GR-09` (Confidencialidad Financiera, Gastos y Credenciales):
+### B. Cortafuegos Arnés² `GR-09` / `GR-14` (Confidencialidad Financiera, Gastos y Credenciales):
 - **PROHIBIDO dar claves o accesos:** Claves SOL de SUNAT, contraseñas en general, tokens, código de Arnés² o correos personales/externos.
 - **PROHIBIDO dar ingresos semanales, mensuales o totales:** Nunca revelar cuánto generó el hotel en la semana, en el mes ni acumulados totales (solo se permite el monto diario del turno actual).
 - **PROHIBIDO hablar o analizar Gastos (`gastos` / `compras_tienda_lotes`):** La tabla `gastos` está 100% bloqueada para el asistente porque son gastos personales/internos de la empresa.
 - **PROHIBIDO usar "Acción Guiada" intrusiva:** No abrir ventanas emergentes solas para no asustar al recepcionista.
-- **Bitácora de Intentos Bloqueados:** Cualquier pregunta bloqueada por `GR-09` queda registrada como `INTENTO_BLOQUEADO_GR09` en `asistente_movimientos_log` para el Extracto del Dueño.
-
-### C. Archivos a Crear / Modificar en `C:\ovalo_mariategui_prueba`:
-1. `database.py` y `supabase_sync.py`: Crear tabla `asistente_movimientos_log` y añadirla a `TABLAS_GRUPO2_PK` y triggers Delta.
-2. `asistente_recepcion.py` **[NUEVO]**: Motor con filtro `GR-09`, consultas de Habitación/Yape/WSP/Vitrina `h1..h36`, guías con fotos, ejecutor directo auditado y generador del Extracto del Dueño.
-3. `arnes_recepcion/.agent/harness/guardrails/safety_rules.json`: Añadir regla `GR-09`.
-4. `static/PanelDisponibilidad.html`, `domain_logic.py` y `main.py`: Burbuja flotante `🤖 Copiloto Óvalo`, visor de fotos guía, confirmación en chat, botón de **Extracto del Dueño** y endpoints RPC (`consultarAsistenteRecepcion`, `confirmarMovimientoAsistente`, `obtenerExtractoDuenoAsistente`).
+- **Bitácora de Intentos Bloqueados:** Cualquier pregunta bloqueada por `GR-09` / `GR-14` queda registrada como `INTENTO_BLOQUEADO_GR09` en `asistente_movimientos_log` para el Extracto del Dueño.
 
 ---
 
-## 💬 8. RESUMEN INTELIGENTE DE WHATSAPP (`wsp_inteligencia.py`) Y SINCRONIZACIÓN ESPEJO ENTRE LAPTOPS EN PRUEBA (`8082 ↔ 8082`) [2026-11-18 — Commit `6dd26af`]
+## 💬 8. RESUMEN INTELIGENTE DE WHATSAPP (`wsp_inteligencia.py`) Y AISLAMIENTO TOTAL DE SUPABASE EN PRUEBA [2026-11-18 / 2026-11-19]
 
 ### A. ¿Cuál fue el motivo y qué problema se resolvió?
 1. **En Laptop 1 salía `"WSP: resumen no disponible"` y no se actualizaban los mensajes:**
-   - **Causa 1 (Esquema incompleto en Supabase):** El recolector de WhatsApp en Laptop 2 (`whatsapp_mcp_recepcion/db.js` + `wsp_daemon.js`) guardaba 20 columnas en `wsp_recepcion_mensajes` (`id_mensaje`, `jid`, `remitente_jid`, `nombre_emisor`, `es_mio`, `timestamp_unix`, `tipo_mensaje`, `tiene_archivo`, `ruta_archivo`, `creado_en`), pero la tabla `wsp_recepcion_mensajes` en Supabase solo tenía las 10 columnas iniciales. Cuando Laptop 2 intentaba subir los mensajes a Supabase, Postgres devolvía `HTTP 400 Bad Request` y `supabase_sync.py` los descartaba en silencio (`0 mensajes` en Supabase).
-   - **Causa 2 (Lectura local en modo Prueba):**En Laptop 2 el entorno de prueba (`8082`) abría directamente `C:\Recepcion_Ovalo_Local\data\ovalo_sistema.db` del disco duro de Laptop 2 (`_abrir_operativa_ro()`), donde sí estaban los mensajes. En cambio, en Laptop 1 la base local tenía `0 mensajes` y en `MODO_PRUEBA` no descargaba las tablas `wsp_recepcion_*` desde Supabase.
-   - **Causa 3 (Rutas RPC en `main.py` de Prueba):** Faltaban registrar en `main.py` las 3 llamadas RPC (`obtenerAlertasWsp`, `obtenerBandejaWsp`, `actualizarResumenWspAhora`) además de la inyección en `domain_logic.py`, y el hilo `_background_wsp_worker` para los cortes programados.
+   - **Causa 1 (Esquema incompleto en Supabase):** El recolector de WhatsApp en Laptop 2 (`whatsapp_mcp_recepcion/db.js` + `wsp_daemon.js`) guardaba 20 columnas en `wsp_recepcion_mensajes` (`id_mensaje`, `jid`, `remitente_jid`, `nombre_emisor`, `es_mio`, `timestamp_unix`, `tipo_mensaje`, `tiene_archivo`, `ruta_archivo`, `creado_en`), pero la tabla `wsp_recepcion_mensajes` en Supabase solo tenía las 10 columnas iniciales. Cuando Laptop 2 intentaba subir los mensajes a Supabase, Postgres devolvía `HTTP 400 Bad Request` y `supabase_sync.py` los descartaba en silencio.
+   - **Causa 2 (Rutas RPC en `main.py`):** Se registraron en `main.py` las 3 llamadas RPC (`obtenerAlertasWsp`, `obtenerBandejaWsp`, `actualizarResumenWspAhora`) además de la inyección en `domain_logic.py`, y el hilo `_background_wsp_worker` para los cortes programados.
 
-### B. ¿Qué cambios técnicos se aplicaron (100% en Entorno de Prueba `8082` + Supabase, sin tocar la Operativa)?
-1. **Migración en Supabase (`hostal-ovalo` — proyecto `fmlfqupwscymosvwnnzx`):**
-   - **`wsp_recepcion_mensajes`:** Se agregaron las columnas `id_mensaje` (con índice único), `jid`, `remitente_jid`, `nombre_emisor`, `es_mio`, `timestamp_unix`, `tipo_mensaje`, `tiene_archivo`, `ruta_archivo`, `creado_en`.
-   - **`wsp_recepcion_chats`:** Se agregaron `tipo`, `ultimo_mensaje`, `fecha_ultimo_mensaje`, `no_leidos`.
-   - **`wsp_recepcion_documentos`:** Se agregaron `id_mensaje`, `jid`, `tipo_archivo`, `nombre_archivo`, `ruta_local`, `metodo_extraccion`, `ruc_emisor`, `fecha_procesado`.
-   - **`wsp_recepcion_cola_envio`:** Se agregaron `telefono_o_jid`, `mensaje`, `ruta_adjunto`, `nombre_adjunto`, `detalle_error`.
-   - **Tablas nuevas en Supabase:** Se crearon `wsp_recepcion_estado` (`clave` PK, `valor`, `actualizado_en`) y `wsp_resumen_ejecutivo` (`id` PK, `fecha_hora`, `slot_horario`, `fuente_ia`, `payload_json`) con políticas RLS (`hostal_sync_policy`) y triggers `fn_log_hostal_change()`.
-2. **Puente Espejo de WhatsApp para Pruebas (`_sincronizar_espejo_wsp_modo_prueba` en `supabase_sync.py`):**
-   - Añadidas `wsp_recepcion_estado` y `wsp_resumen_ejecutivo` al catálogo `TABLAS_GRUPO2_PK` y auto-migración de columnas híbridas en SQLite (`_extra_wsp_cols`).
-   - En `MODO_PRUEBA` (`8082`), Laptop 2 sube automáticamente sus chats, mensajes, documentos, estado y cortes de `wsp_resumen_ejecutivo` a Supabase, y Laptop 1 (`8082`) los descarga en solo lectura (`extraer_datos_reales_supabase_readonly`) cada 25 segundos y cada vez que el usuario pulsa **"Actualizar resumen ahora"**.
-   - **Aislamiento garantizado:** No toca estancias, pagos, tienda ni Google Sheets.
+### B. ¿Qué cambios técnicos están activos (`2026-11-19`)?
+1. **Migración en Supabase (`hostal-ovalo` — proyecto `fmlfqupwscymosvwnnzx`) y SQLite Local (`database.py`):**
+   - **`wsp_recepcion_mensajes`:** Columnas completas (`id_mensaje` con índice único, `jid`, `remitente_jid`, `nombre_emisor`, `es_mio`, `timestamp_unix`, `tipo_mensaje`, `tiene_archivo`, `ruta_archivo`, `creado_en`).
+   - **`wsp_recepcion_chats`:** `jid`, `tipo`, `ultimo_mensaje`, `fecha_ultimo_mensaje`, `no_leidos`.
+   - **`wsp_recepcion_documentos`:** `id_mensaje`, `jid`, `tipo_archivo`, `nombre_archivo`, `ruta_local`, `metodo_extraccion`, `ruc_emisor`, `fecha_procesado`.
+   - **`wsp_recepcion_cola_envio`:** `telefono_o_jid`, `mensaje`, `ruta_adjunto`, `nombre_adjunto`, `detalle_error`.
+   - **Tablas adicionales:** `wsp_recepcion_estado` (`clave` PK, `valor`, `actualizado_en`) y `wsp_resumen_ejecutivo` (`id` PK, `fecha_hora`, `slot_horario`, `fuente_ia`, `payload_json`).
+2. **Separación Estricta de Sincronización WSP entre Operativa (`:8080`) y Prueba (`:8082`) [Actualizado `2026-11-19`]:**
+   - **En Entorno Operativo (`:8080`):** El daemon `wsp_daemon.js` (con candado anti-duplicado single-instance en `C:\Recepcion_Ovalo_Local\whatsapp_mcp_recepcion`) escribe en `C:\Recepcion_Ovalo_Local\data\ovalo_sistema.db` y sincroniza con Supabase (`hostal-ovalo`) mediante los triggers productivos de Operativa.
+   - **En Entorno de Prueba (`:8082`):** **Supabase está 100% apagado** (`SUPABASE_ENABLED = False` y `_sincronizar_espejo_wsp_modo_prueba` desactivado, `0` llamadas HTTP a Supabase, `_supabase_outbox = 0` y `0` triggers `trg_sb_*`). En Laptop 2, el visor WSP de Prueba (`:8082`) lee en modo solo lectura (`_abrir_operativa_ro()`) los mensajes locales de `C:\Recepcion_Ovalo_Local\data\ovalo_sistema.db` o de su propia base local de prueba sin generar tráfico hacia Supabase.
+   - **Protección de Código Propio en Prueba (`instalar_arnes_laptop2.py` + `lanzador_escritorio.py`):** `_prueba_tiene_codigo_propio()` y `_autoproteger_codigo_prueba()` impiden que la Operativa sobrescriba los módulos adelantados de `C:\ovalo_mariategui_prueba`.
 3. **Motor Funcional de WhatsApp (`wsp_inteligencia.py` + `main.py` + `PanelDisponibilidad.html`):**
    - **Visor 100% Solo Lectura y Síntesis Ejecutiva:** Sin botones de envío ni plantillas que alteren conversaciones reales.
-   - **Fallback Inteligente de Base de Datos (`_recolectar_chats_clientes` y `_estado_daemon_raw`):** Si en `MODO_PRUEBA` la base operativa local de esa laptop tiene 0 mensajes (como ocurre en Laptop 1), cae automáticamente a la base SQLite de Prueba (`C:\ovalo_mariategui_prueba\data\ovalo_sistema.db`) alimentada desde Supabase.
-   - **Auto-regeneración de corte vacío:** Si el último corte en `wsp_resumen_ejecutivo` se había generado cuando aún había 0 mensajes, en cuanto entran los mensajes reales regenera el análisis automáticamente.
    - **Cruce automático con el Hotel:** Cruza cada conversación de WhatsApp por celular de 9 dígitos, nombre de perfil (`sugerencia_wsp`), DNI/RUC, habitación y comprobantes emitidos en `estancias`, `huespedes_padron`, `empresas_padron`, `sunat_ventas` y `sunat_lineas_cache`.
    - **Clasificación en 3 Bloques Claros en el Modal WSP:**
-     1. 🔴 **Pendientes por responder / emitir comprobante** (ej. solicitudes de factura/boleta, vouchers enviados o consultas sin respuesta de recepción).
-     2. 琥 **Recomendaciones, Notas y Acuerdos del turno** (ej. huéspedes que avisan hora de llegada, acuerdos de tarifa o recojo).
+     1. 🔴 **Pendientes por responder / emitir comprobante** (solicitudes de factura/boleta, vouchers enviados o consultas sin respuesta de recepción).
+     2. 🟡 **Recomendaciones, Notas y Acuerdos del turno** (huéspedes que avisan hora de llegada, acuerdos de tarifa o recojo).
      3. 🟢 **Atendidos y cerrados** (conversaciones donde recepción ya envió el PDF del comprobante o respondió y cerró con agradecimiento).
    - **4 Cortes Programados al Día (`OvaloWspWorker`):** Ejecuta cortes automáticos a las `08:00`, `13:00`, `19:00` y `23:00`, más actualización manual en vivo con el botón **"Actualizar resumen ahora"**.
 
-### C. Estado Verificado en Vivo (`2026-11-18`):
-- **En Supabase y en ambas Laptops (Prueba `8082`):** `83 chats`, `238 mensajes`, `4 estados` (`CONECTADO`) y `20 cortes ejecutivos`.
-- **En Barra Superior de `http://127.0.0.1:8082`:** Muestra `WSP: 3 por responder · 7 atendidos (Corte 08:00)` con `Kata`, `Mari` e `ISA` en pendientes, 1 nota de seguimiento y 7 chats atendidos.
 
 

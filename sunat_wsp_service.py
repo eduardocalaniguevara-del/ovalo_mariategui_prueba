@@ -57,6 +57,44 @@ def calcular_valor_unitario_105(precio_con_igv: float) -> float:
     return round(float(precio_con_igv) / FACTOR_IGV_HOTEL, 4)
 
 
+def _asegurar_tablas_sunat_local(conn_sv) -> None:
+    """Garantiza que sunat_ventas y sunat_lineas_cache existan en SQLite antes de insertar en caliente."""
+    conn_sv.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sunat_ventas (
+            nro_cp          TEXT PRIMARY KEY,
+            tipo            TEXT NOT NULL DEFAULT '',
+            periodo_mes     TEXT NOT NULL DEFAULT '',
+            fecha_emision   TEXT DEFAULT '',
+            receptor_doc    TEXT DEFAULT '',
+            receptor_nombre TEXT DEFAULT '',
+            monto_total     REAL DEFAULT 0,
+            estado          TEXT DEFAULT 'VIGENTE',
+            resumen_items   TEXT DEFAULT '',
+            actualizado_en  TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+        """
+    )
+    conn_sv.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sunat_lineas_cache (
+            id_linea      INTEGER PRIMARY KEY AUTOINCREMENT,
+            nro_cp        TEXT NOT NULL DEFAULT '',
+            tipo          TEXT NOT NULL DEFAULT 'BOLETA',
+            noche_dmy     TEXT NOT NULL DEFAULT '',
+            hab           TEXT NOT NULL DEFAULT '',
+            monto_linea   REAL NOT NULL DEFAULT 0,
+            total_cp      REAL NOT NULL DEFAULT 0,
+            cliente       TEXT NOT NULL DEFAULT '',
+            doc           TEXT NOT NULL DEFAULT '',
+            fecha_emision TEXT NOT NULL DEFAULT '',
+            estado        TEXT NOT NULL DEFAULT 'VIGENTE',
+            descripcion   TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
+
 def _python_cli_bin() -> str:
     exe = sys.executable
     if exe.lower().endswith("pythonw.exe"):
@@ -681,6 +719,106 @@ def _ejecutar_trabajo_sunat_wsp(
                             ],
                             monto=float((res_nc.get("datos_cp_origen") or {}).get("monto") or 0),
                         )
+                    if (
+                        not modo_borrador
+                        and nro_nc
+                        and not res_nc.get("simulado")
+                        and "BORRADOR" not in nro_nc.upper()
+                        and "SIMULAD" not in nro_nc.upper()
+                    ):
+                        try:
+                            ahora_dt = datetime.now()
+                            fecha_em_dmy = ahora_dt.strftime("%d/%m/%Y")
+                            periodo_mes = ahora_dt.strftime("%Y-%m")
+                            ahora_str = ahora_dt.strftime("%Y-%m-%d %H:%M:%S")
+                            cp_orig_norm = re.sub(r"\s+", "", str(nro_origen or "").upper())
+                            nc_norm = re.sub(r"\s+", "", str(nro_nc or "").upper())
+                            datos_orig = res_nc.get("datos_cp_origen") or {}
+                            with db_transaction() as conn_sv:
+                                _asegurar_tablas_sunat_local(conn_sv)
+                                orig_sv = conn_sv.execute(
+                                    "SELECT receptor_doc, receptor_nombre, monto_total FROM sunat_ventas WHERE nro_cp = ?",
+                                    (cp_orig_norm,),
+                                ).fetchone()
+                                orig_sl = conn_sv.execute(
+                                    "SELECT noche_dmy, hab, cliente, doc FROM sunat_lineas_cache WHERE nro_cp = ? LIMIT 1",
+                                    (cp_orig_norm,),
+                                ).fetchone()
+                                monto_nc = abs(
+                                    float(
+                                        datos_orig.get("monto")
+                                        or (orig_sv["monto_total"] if orig_sv else 0)
+                                        or 0.0
+                                    )
+                                )
+                                rec_doc_nc = str(
+                                    datos_orig.get("doc")
+                                    or (orig_sv["receptor_doc"] if orig_sv else "")
+                                    or (orig_sl["doc"] if orig_sl else "")
+                                    or ""
+                                ).strip()
+                                rec_nom_nc = str(
+                                    datos_orig.get("cliente")
+                                    or data_norm.get("cliente")
+                                    or (orig_sv["receptor_nombre"] if orig_sv else "")
+                                    or (orig_sl["cliente"] if orig_sl else "")
+                                    or "CLIENTES VARIOS"
+                                ).strip()
+                                noche_nc = str((orig_sl["noche_dmy"] if orig_sl else "") or fecha_em_dmy).strip()
+                                hab_nc = str(hab or (orig_sl["hab"] if orig_sl else "") or "").strip()
+                                desc_nc = f"NC ANULA {cp_orig_norm} | {motivo}"[:600]
+
+                                if cp_orig_norm:
+                                    conn_sv.execute(
+                                        "UPDATE sunat_ventas SET estado = 'ANULADO', actualizado_en = ? WHERE nro_cp = ?",
+                                        (ahora_str, cp_orig_norm),
+                                    )
+                                    conn_sv.execute(
+                                        "UPDATE sunat_lineas_cache SET estado = 'ANULADO' WHERE nro_cp = ?",
+                                        (cp_orig_norm,),
+                                    )
+
+                                conn_sv.execute("DELETE FROM sunat_ventas WHERE nro_cp = ?", (nc_norm,))
+                                conn_sv.execute(
+                                    """
+                                    INSERT INTO sunat_ventas
+                                    (nro_cp, tipo, periodo_mes, fecha_emision, receptor_doc, receptor_nombre,
+                                     monto_total, estado, resumen_items, actualizado_en)
+                                    VALUES (?, 'NOTA_CREDITO', ?, ?, ?, ?, ?, 'VIGENTE', ?, ?)
+                                    """,
+                                    (
+                                        nc_norm,
+                                        periodo_mes,
+                                        fecha_em_dmy,
+                                        rec_doc_nc,
+                                        rec_nom_nc,
+                                        monto_nc,
+                                        desc_nc,
+                                        ahora_str,
+                                    ),
+                                )
+                                conn_sv.execute("DELETE FROM sunat_lineas_cache WHERE nro_cp = ?", (nc_norm,))
+                                conn_sv.execute(
+                                    """
+                                    INSERT INTO sunat_lineas_cache
+                                    (nro_cp, tipo, noche_dmy, hab, monto_linea, total_cp, cliente, doc,
+                                     fecha_emision, estado, descripcion)
+                                    VALUES (?, 'NOTA_CREDITO', ?, ?, ?, ?, ?, ?, ?, 'VIGENTE', ?)
+                                    """,
+                                    (
+                                        nc_norm,
+                                        noche_nc,
+                                        hab_nc,
+                                        -monto_nc,
+                                        -monto_nc,
+                                        rec_nom_nc,
+                                        rec_doc_nc,
+                                        fecha_em_dmy,
+                                        desc_nc,
+                                    ),
+                                )
+                        except Exception:
+                            pass
                     if wakeup_cb:
                         wakeup_cb()
                 except Exception as exc_db:
@@ -867,6 +1005,81 @@ def _ejecutar_trabajo_sunat_wsp(
                     wakeup_cb()
             except Exception as exc_upd:
                 res_json["warn_sqlite"] = str(exc_upd)
+
+        # Registrar inmediatamente el comprobante recién emitido en firme en sunat_ventas y sunat_lineas_cache
+        # para que la vista de Contabilidad (SUNAT <-> BCP) lo refleje al instante sin requerir extracción manual.
+        if (
+            not modo_borrador
+            and nro_cp
+            and not res_json.get("simulado")
+            and "BORRADOR" not in nro_cp.upper()
+            and "SIMULAD" not in nro_cp.upper()
+        ):
+            try:
+                ahora_dt = datetime.now()
+                fecha_em_dmy = ahora_dt.strftime("%d/%m/%Y")
+                periodo_mes = ahora_dt.strftime("%Y-%m")
+                cp_emit_norm = re.sub(r"\s+", "", str(nro_cp or "").upper())
+                resumen_it = " | ".join(
+                    f"{it.get('cantidad', 1):.2f} UNIDAD {it.get('descripcion', '')} {float(it.get('precio_unitario', 0)):.2f}"
+                    for it in (items_normalizados or [])
+                )[:600]
+                with db_transaction() as conn_sv:
+                    _asegurar_tablas_sunat_local(conn_sv)
+                    conn_sv.execute(
+                        "DELETE FROM sunat_ventas WHERE nro_cp = ?",
+                        (cp_emit_norm,),
+                    )
+                    conn_sv.execute(
+                        """
+                        INSERT INTO sunat_ventas
+                        (nro_cp, tipo, periodo_mes, fecha_emision, receptor_doc, receptor_nombre,
+                         monto_total, estado, resumen_items, actualizado_en)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'VIGENTE', ?, ?)
+                        """,
+                        (
+                            cp_emit_norm,
+                            "FACTURA" if tipo == "FACTURA" else "BOLETA",
+                            periodo_mes,
+                            fecha_em_dmy,
+                            doc_num or dni_huesped or "",
+                            cliente or "CLIENTES VARIOS",
+                            float(total_monto or 0.0),
+                            resumen_it,
+                            ahora_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        ),
+                    )
+                    noche_ref = fecha_em_dmy
+                    if estancia_uuid:
+                        r_st = conn_sv.execute(
+                            "SELECT fecha_in_dmy FROM estancias WHERE estancia_uuid = ?",
+                            (estancia_uuid,),
+                        ).fetchone()
+                        if r_st and r_st["fecha_in_dmy"]:
+                            noche_ref = str(r_st["fecha_in_dmy"]).strip()
+                    conn_sv.execute("DELETE FROM sunat_lineas_cache WHERE nro_cp = ?", (cp_emit_norm,))
+                    conn_sv.execute(
+                        """
+                        INSERT INTO sunat_lineas_cache
+                        (nro_cp, tipo, noche_dmy, hab, monto_linea, total_cp, cliente, doc,
+                         fecha_emision, estado, descripcion)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'VIGENTE', ?)
+                        """,
+                        (
+                            cp_emit_norm,
+                            "FACTURA" if tipo == "FACTURA" else "BOLETA",
+                            noche_ref,
+                            hab or "",
+                            float(total_monto or 0.0),
+                            float(total_monto or 0.0),
+                            cliente or "CLIENTES VARIOS",
+                            doc_num or dni_huesped or "",
+                            fecha_em_dmy,
+                            resumen_it,
+                        ),
+                    )
+            except Exception:
+                pass
 
         msg_final = f"{'Factura' if tipo == 'FACTURA' else 'Boleta'} {nro_cp} emitida exitosamente."
         if accion == "EMITIR_Y_WSP":

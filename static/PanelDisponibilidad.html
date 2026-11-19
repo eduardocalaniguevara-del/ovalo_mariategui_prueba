@@ -2836,7 +2836,10 @@
             efectivo: Number(st.pagoEfec) || 0,
             yape: Number(st.pagoYape) || 0,
             visa: Number(st.pagoVisa) || 0,
-            codigoMontoHora: st.codigoMontoHora || ""
+            codigoMontoHora: st.codigoMontoHora || "",
+            historial: Array.isArray(st.pagosHistorial)
+              ? st.pagosHistorial
+              : (st.pagoDetalle && Array.isArray(st.pagoDetalle.historial) ? st.pagoDetalle.historial : [])
           },
           adicional: totalAdic,
           adicSnacksCargado: snacks,
@@ -5304,9 +5307,12 @@
 
     // Guarda el cambio de Pendiente -> Emitido (y monto factura / adic comprobante / celular) desde el modal
     function guardarEstadoComprobanteModal(habNum, forzarEmitido) {
-      let h = (window.habitacionesData || []).find(x => String(x.hab) === String(habNum));
-      if (!h && window._estanciaFacturacionActiva && (String(window._estanciaFacturacionActiva.hab) === String(habNum) || !habNum)) {
+      let h = null;
+      if (window._estanciaFacturacionActiva && (String(window._estanciaFacturacionActiva.hab) === String(habNum) || !habNum)) {
         h = window._estanciaFacturacionActiva;
+      }
+      if (!h) {
+        h = (window.habitacionesData || []).find(x => String(x.hab) === String(habNum));
       }
       if (!h) return;
       const f = obtenerFacturacionEfectiva(h) || {};
@@ -5386,7 +5392,8 @@
 
       const payload = {
         hab: h.hab,
-        fila: f.filaNum || h.filaNum || 0,
+        estanciaUuid: h.estanciaUuid || h.estancia_uuid || h.uuid || f.estanciaUuid || "",
+        fila: f.filaNum || h.filaNum || h.fila || 0,
         fechaRef: inputFecha ? inputFecha.value : "",
         dni: nuevoDni || undefined,
         estadoComp: nuevoEstado,
@@ -5419,6 +5426,12 @@
           adicComprobante: nuevoAdic !== undefined ? nuevoAdic : (f.adicComprobante || 0)
         });
         renderTabla();
+        if (typeof window.cargarVistaContabilidad === "function") {
+          const vistaContab = document.getElementById("vistaContabilidad");
+          if ((vistaContab && !vistaContab.classList.contains("hidden")) || (window.CONTABILIDAD_GLOBAL_STATE && window.CONTABILIDAD_GLOBAL_STATE.data)) {
+            window.cargarVistaContabilidad();
+          }
+        }
       };
 
       if (typeof google !== "undefined" && google.script && google.script.run) {
@@ -5527,6 +5540,42 @@
             </div>` : ""}
           </div>
         </div>
+
+        ${Array.isArray(h.pagoDetalle.historial) && h.pagoDetalle.historial.length > 0 ? `
+        <div class="bg-slate-50 border border-slate-200 p-2.5 rounded-lg space-y-1.5">
+          <div class="text-[10.5px] font-black uppercase tracking-wider text-slate-600 flex justify-between items-center">
+            <span>🕒 Historial de pagos registrados</span>
+            <span class="text-[10px] font-bold text-slate-500">${h.pagoDetalle.historial.length} mov.</span>
+          </div>
+          <div class="space-y-1 max-h-44 overflow-y-auto pr-0.5">
+            ${h.pagoDetalle.historial.map(pg => {
+              const med = String(pg.medio || "Efectivo");
+              const medLow = med.toLowerCase();
+              const badgeCls = medLow.includes("yape") || medLow.includes("plin")
+                ? "bg-purple-100 text-purple-900 border-purple-300"
+                : (medLow.includes("visa")
+                  ? "bg-sky-100 text-sky-900 border-sky-300"
+                  : "bg-emerald-100 text-emerald-900 border-emerald-300");
+              const mVal = Number(pg.monto) || 0;
+              const montoCls = mVal < 0 ? "text-red-700" : "text-slate-900";
+              const fh = String(pg.fechaHora || pg.fecha || "-");
+              const fhShort = fh.length > 16 ? fh.slice(0, 16) : fh;
+              const conc = pg.concepto || pg.tipo || "Pago";
+              const opTxt = pg.op ? ` · Op: ${escHtmlPanel(pg.op)}` : "";
+              return `
+                <div class="flex items-center justify-between gap-2 bg-white px-2 py-1 rounded border border-slate-200 text-[11px]">
+                  <div class="min-w-0">
+                    <div class="font-bold text-slate-800 truncate">${escHtmlPanel(conc)}</div>
+                    <div class="text-[10px] text-slate-500 truncate">${escHtmlPanel(fhShort)}${opTxt}</div>
+                  </div>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <span class="px-1.5 py-0.5 rounded border text-[9.5px] font-black ${badgeCls}">${escHtmlPanel(med)}</span>
+                    <strong class="font-black ${montoCls}">${mVal < 0 ? "-" : ""}${fmtSoles(Math.abs(mVal))}</strong>
+                  </div>
+                </div>`;
+            }).join("")}
+          </div>
+        </div>` : ""}
 
         ${tPagada > 0 ? `
         <div class="bg-pink-50 border border-pink-200 p-2.5 rounded-lg text-xs shadow-2xs">

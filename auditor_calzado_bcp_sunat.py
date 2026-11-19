@@ -171,6 +171,50 @@ def sincronizar_sunat_nov_sqlite(db_path: Path):
             cur.execute("UPDATE sunat_ventas SET monto_total = COALESCE(total, 0) WHERE COALESCE(monto_total, 0) = 0")
     if "actualizado_en" not in cols_sv:
         cur.execute("ALTER TABLE sunat_ventas ADD COLUMN actualizado_en TEXT DEFAULT ''")
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sunat_lineas_cache (
+            id_linea      INTEGER PRIMARY KEY AUTOINCREMENT,
+            nro_cp        TEXT NOT NULL DEFAULT '',
+            tipo          TEXT NOT NULL DEFAULT 'BOLETA',
+            noche_dmy     TEXT NOT NULL DEFAULT '',
+            hab           TEXT NOT NULL DEFAULT '',
+            monto_linea   REAL NOT NULL DEFAULT 0,
+            total_cp      REAL NOT NULL DEFAULT 0,
+            cliente       TEXT NOT NULL DEFAULT '',
+            doc           TEXT NOT NULL DEFAULT '',
+            fecha_emision TEXT NOT NULL DEFAULT '',
+            estado        TEXT NOT NULL DEFAULT 'VIGENTE',
+            descripcion   TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+
+    # Preserva CPEs de Nov 2026 emitidos localmente después del corte JSON estático
+    extra_sv_rows = [
+        r for r in cur.execute(
+            """
+            SELECT nro_cp, tipo, periodo_mes, fecha_emision, receptor_doc, receptor_nombre,
+                   monto_total, estado, resumen_items, actualizado_en
+            FROM sunat_ventas
+            WHERE periodo_mes = '2026-11'
+            """
+        ).fetchall()
+        if norm_cp(r[0]) not in docs_canon
+    ]
+    extra_sl_rows = [
+        r for r in cur.execute(
+            """
+            SELECT nro_cp, tipo, noche_dmy, hab, monto_linea, total_cp, cliente, doc,
+                   fecha_emision, estado, descripcion
+            FROM sunat_lineas_cache
+            WHERE fecha_emision LIKE '%/11/2026' OR noche_dmy LIKE '%/11/2026'
+            """
+        ).fetchall()
+        if norm_cp(r[0]) not in docs_canon
+    ]
+
     cur.execute("DELETE FROM sunat_ventas WHERE periodo_mes = '2026-11'")
     for r in ventas_rows:
         cur.execute(
@@ -260,6 +304,123 @@ def sincronizar_sunat_nov_sqlite(db_path: Path):
                     entry["resumen_items"],
                 ),
             )
+            inserted_cps.add(cp)
+
+    # Restaura filas locales emitidas después del corte JSON estático
+    cps_en_sv = set(docs_canon.keys())
+    for r in extra_sv_rows:
+        cp_ext = norm_cp(r[0])
+        if not cp_ext:
+            continue
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO sunat_ventas
+            (nro_cp, tipo, periodo_mes, fecha_emision, receptor_doc, receptor_nombre,
+             monto_total, estado, resumen_items, actualizado_en)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (cp_ext, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]),
+        )
+        cps_en_sv.add(cp_ext)
+
+    cps_en_sl = set(inserted_cps)
+    for r in extra_sl_rows:
+        cp_ext = norm_cp(r[0])
+        if not cp_ext or cp_ext in inserted_cps:
+            continue
+        cur.execute(
+            """
+            INSERT INTO sunat_lineas_cache
+            (nro_cp, tipo, noche_dmy, hab, monto_linea, total_cp, cliente, doc,
+             fecha_emision, estado, descripcion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (cp_ext, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10]),
+        )
+        cps_en_sl.add(cp_ext)
+
+    # Backfill automático desde estancias para CPEs de Nov 2026 aún ausentes en sunat_ventas / sunat_lineas_cache
+    has_estancias = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='estancias'"
+    ).fetchone()
+    if has_estancias:
+        est_nov_rows = cur.execute(
+            """
+            SELECT nro_comp, fecha_in_dmy, hab, noches, tarifa, monto_factura,
+                   dni, ruc, empresa, huesped, updated_at
+            FROM estancias
+            WHERE ymd_in >= 20261101 AND TRIM(COALESCE(nro_comp, '')) != ''
+            ORDER BY ymd_in, sheet_row, rowid
+            """
+        ).fetchall()
+        grupos_est = defaultdict(list)
+        for er in est_nov_rows:
+            cp_est = norm_cp(er[0])
+            if cp_est.startswith("EB01-") or cp_est.startswith("E001-"):
+                grupos_est[cp_est].append(er)
+
+        for cp_est, grupo in grupos_est.items():
+            tipo_cp = "FACTURA" if cp_est.startswith("E001-") else "BOLETA"
+            primera = grupo[0]
+            monto_tot = r2(
+                sum(
+                    (float(g[5] or 0) if float(g[5] or 0) > 0 else float(g[4] or 0) * max(1, int(g[3] or 1)))
+                    for g in grupo
+                )
+            )
+            upd = str(primera[10] or "").strip()
+            if upd.startswith("2026-11-") and len(upd) >= 10:
+                f_em = f"{upd[8:10]}/{upd[5:7]}/{upd[0:4]}"
+            else:
+                f_em = str(primera[1] or "").strip()
+            rec_doc_raw = str(primera[7] or "").strip() if tipo_cp == "FACTURA" else str(primera[6] or "").strip()
+            rec_doc = "" if rec_doc_raw.upper() in ("-", "SIN DOCUMENTO", "S/D") else rec_doc_raw
+            rec_nom = (
+                (str(primera[8] or "").strip() or str(primera[9] or "").strip())
+                if tipo_cp == "FACTURA"
+                else str(primera[9] or "").strip()
+            )
+            resumen = " | ".join(
+                f"ALOJAMIENTO {str(g[1] or '').strip()} HAB N {str(g[2] or '').strip()}"
+                for g in grupo
+            )[:600]
+
+            if cp_est not in cps_en_sv:
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO sunat_ventas
+                    (nro_cp, tipo, periodo_mes, fecha_emision, receptor_doc, receptor_nombre,
+                     monto_total, estado, resumen_items, actualizado_en)
+                    VALUES (?, ?, '2026-11', ?, ?, ?, ?, 'VIGENTE', ?, ?)
+                    """,
+                    (cp_est, tipo_cp, f_em, rec_doc, rec_nom, monto_tot, resumen, ahora),
+                )
+                cps_en_sv.add(cp_est)
+
+            if cp_est not in cps_en_sl:
+                for g in grupo:
+                    m_ln = r2(float(g[5] or 0) if float(g[5] or 0) > 0 else float(g[4] or 0) * max(1, int(g[3] or 1)))
+                    cur.execute(
+                        """
+                        INSERT INTO sunat_lineas_cache
+                        (nro_cp, tipo, noche_dmy, hab, monto_linea, total_cp, cliente, doc,
+                         fecha_emision, estado, descripcion)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'VIGENTE', ?)
+                        """,
+                        (
+                            cp_est,
+                            tipo_cp,
+                            str(g[1] or "").strip(),
+                            str(g[2] or "").strip(),
+                            m_ln,
+                            monto_tot,
+                            rec_nom,
+                            rec_doc,
+                            f_em,
+                            f"ALOJAMIENTO {str(g[1] or '').strip()} HAB N {str(g[2] or '').strip()}",
+                        ),
+                    )
+                cps_en_sl.add(cp_est)
 
     con.commit()
     con.close()

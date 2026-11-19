@@ -7,8 +7,10 @@ Se ejecuta con doble clic desde el ícono del Escritorio ("Recepción Hotel Óva
 - Si ya estaba prendido, abre la ventana de Recepción inmediatamente.
 """
 
+import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
@@ -19,6 +21,71 @@ import webbrowser
 APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
+
+
+def _autoproteger_codigo_prueba() -> None:
+    """
+    Candado autónomo del entorno de prueba (Punto 1c):
+    Si algún script externo antiguo (ej. instalar_arnes_laptop2.py tras un reset de Operativa)
+    llegara a sobrescribir config.py / supabase_sync.py / main.py en esta carpeta de prueba
+    o degradar spreadsheet_id a SIN_HOJA_MODO_PRUEBA, restaura de inmediato desde HEAD local
+    antes de importar config.py para evitar caída por ImportError.
+    """
+    ruta_low = str(APP_DIR).lower()
+    if "prueba" not in ruta_low or "recepcion_ovalo_local" in ruta_low or "terrazas" in ruta_low:
+        return
+
+    cfg_file = APP_DIR / "config.py"
+    if cfg_file.is_file() and (APP_DIR / ".git").exists():
+        try:
+            txt_cfg = cfg_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            txt_cfg = ""
+        if "HOJA_PRUEBA_HABILITADA" not in txt_cfg:
+            for git_cand in (
+                shutil.which("git"),
+                r"C:\Hostal_Sistema\tools\mingit\cmd\git.exe",
+                r"C:\Program Files\Git\cmd\git.exe",
+            ):
+                if git_cand and os.path.exists(git_cand):
+                    try:
+                        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
+                        subprocess.run(
+                            [
+                                git_cand,
+                                "checkout",
+                                "HEAD",
+                                "--",
+                                "config.py",
+                                "supabase_sync.py",
+                                "main.py",
+                                "sync_engine.py",
+                                "promover_a_operativa.py",
+                                "instalar_arnes_laptop2.py",
+                            ],
+                            cwd=str(APP_DIR),
+                            capture_output=True,
+                            timeout=10,
+                            creationflags=flags,
+                        )
+                    except Exception:
+                        pass
+                    break
+
+    perfil_file = APP_DIR / "data" / "hotel_perfil.json"
+    if perfil_file.is_file():
+        try:
+            pf = json.loads(perfil_file.read_text(encoding="utf-8-sig"))
+            if isinstance(pf, dict) and str(pf.get("spreadsheet_id") or "").strip() in ("", "SIN_HOJA_MODO_PRUEBA"):
+                pf["spreadsheet_id"] = "1VXg1d8QQgS2te1NWlSFbK6Y4fqLV5B-kNwJ-mezRoqE"
+                pf["modo_prueba"] = True
+                pf["conectar_pruebas_supabase"] = False
+                perfil_file.write_text(json.dumps(pf, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+
+_autoproteger_codigo_prueba()
 
 from config import APP_HOST, APP_PORT, NOMBRE_HOTEL
 
