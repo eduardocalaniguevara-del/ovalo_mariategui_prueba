@@ -6709,6 +6709,57 @@ def _inyectar_rutas_en_servidor_activo() -> None:
                     pdf_path = pl.generar_pdf_cuenta_hab_local({"hab": hab, "modo": modo, "fecha": fecha, "estanciaUuid": estanciaUuid})
                     return FileResponse(str(pdf_path), media_type="application/pdf", filename=pdf_path.name, headers={"Cache-Control": "no-store"})
 
+            if "/api/system/restart" not in rutas_existentes:
+                @app_inst.post("/api/system/restart")
+                def _hot_system_restart():
+                    import os as _os, subprocess as _sp
+                    from pathlib import Path as _Path
+                    try:
+                        from auto_updater import reiniciar_servidor_en_caliente
+                        reiniciar_servidor_en_caliente()
+                    except Exception:
+                        pass
+                    _dir = getattr(m, "_APP_DIR", str(_Path(__file__).resolve().parent))
+                    _ps1 = _Path(_dir) / "reiniciar_app.ps1"
+                    if _ps1.exists() and _os.name == "nt":
+                        _sp.Popen(
+                            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(_ps1)],
+                            cwd=_dir,
+                            creationflags=0x08000000,
+                        )
+                    return {"ok": True, "status": "RESTARTING"}
+
+            if "/api/prueba/bajar-datos" not in rutas_existentes:
+                @app_inst.post("/api/prueba/bajar-datos")
+                def _hot_prueba_bajar_datos():
+                    import os as _os, subprocess as _sp, time as _time
+                    from pathlib import Path as _Path
+                    from fastapi.responses import JSONResponse as _JSONResponse
+                    from config import MODO_PRUEBA as _MODO_PRUEBA
+                    from sync_engine import pull_from_sheets as _pull_from_sheets
+                    if not _MODO_PRUEBA:
+                        raise HTTPException(status_code=403, detail="Acción exclusiva del entorno de PRUEBA (:8082).")
+                    _scr = _Path(r"C:\Hostal_Sistema\scripts\refrescar_hoja_prueba.py")
+                    if not _scr.exists():
+                        raise HTTPException(status_code=404, detail=f"No se encontró {_scr}")
+                    _t0 = _time.time()
+                    _proc = _sp.run(
+                        [_sys.executable, str(_scr)],
+                        cwd=str(_scr.parent),
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=300,
+                        creationflags=0x08000000 if _os.name == "nt" else 0,
+                    )
+                    if _proc.returncode != 0:
+                        _det = ((_proc.stdout or "") + "\n" + (_proc.stderr or "")).strip()[-600:]
+                        return _JSONResponse(status_code=500, content={"ok": False, "error": f"refrescar_hoja_prueba.py falló (rc={_proc.returncode}): {_det}"})
+                    _pull_from_sheets(full_bootstrap=True)
+                    _dur = round(_time.time() - _t0, 1)
+                    return {"ok": True, "duracion_seg": _dur, "mensaje": f"Hoja 2026_Prueba_Ovalo y base local actualizadas desde Operativa en {_dur}s."}
+
             # Reemplazar el endpoint /api/rpc/{method_name} en la tabla de rutas de FastAPI en vivo
             def _nuevo_rpc_handler(method_name: str, body: Any, **_kwargs: Any):
                 args = getattr(body, "args", None) or []
