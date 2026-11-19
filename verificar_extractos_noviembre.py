@@ -40,14 +40,13 @@ try:
 except Exception:
     pass
 
-from config import DB_PATH, DATA_DIR
+from config import CREDENTIAL_CANDIDATES, DATA_DIR, DB_PATH, HOSTAL_SISTEMA_DIR, SCRIPTS_HOSTAL_DIR
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_JSON_PATH = DATA_DIR / "corroboracion_ingresos_bcp_nov2026.json"
 
-CREDENTIALS_PATHS = [
-    Path(r"C:\Hostal_Sistema\config\credentials.json"),
+CREDENTIALS_PATHS = list(CREDENTIAL_CANDIDATES) + [
     BASE_DIR / "config" / "credentials.json",
     Path(r"C:\Users\josec\Downloads\trabajo\Sistema de agentes IA\credentials.json"),
 ]
@@ -222,14 +221,17 @@ def ejecutar_sincronizaciones_locales() -> Dict[str, Any]:
         print(f"   [!] Error en sincronizar_transferencias_maelen_correo: {e}")
         res_m = {"ok": False, "error": str(e)}
 
-    # Ejecutar auditor_yape.py y conciliar_con_criterio.py
+    # Ejecutar auditor_yape.py y conciliar_con_criterio.py desde SCRIPTS_HOSTAL_DIR (con fallback a C:\Hostal_Sistema\scripts)
     for script_name in ["auditor_yape.py", "conciliar_con_criterio.py"]:
-        script_path = Path(r"C:\Hostal_Sistema\scripts") / script_name
+        script_path = SCRIPTS_HOSTAL_DIR / script_name
+        if not script_path.exists():
+            script_path = HOSTAL_SISTEMA_DIR / "scripts" / script_name
         if script_path.exists():
-            print(f"\n📊 Ejecutando {script_name}...")
+            print(f"\n📊 Ejecutando {script_name} ({script_path})...")
             try:
                 proc = subprocess.run(
                     [sys.executable, str(script_path)],
+                    cwd=str(script_path.parent),
                     capture_output=True,
                     text=True,
                     timeout=90,

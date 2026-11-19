@@ -35,6 +35,7 @@ from config import (
     MODO_PRUEBA,
     NOMBRE_HOTEL,
     PERFIL_HOTEL_PATH,
+    SCRIPTS_HOSTAL_DIR,
     STATIC_DIR,
     SYNC_INTERVAL_SECONDS,
 )
@@ -677,9 +678,14 @@ def api_prueba_bajar_datos():
     if not MODO_PRUEBA:
         raise HTTPException(status_code=403, detail="Acción exclusiva del entorno de PRUEBA (:8082).")
 
-    script_refrescar = Path(r"C:\Hostal_Sistema\scripts\refrescar_hoja_prueba.py")
+    script_refrescar = SCRIPTS_HOSTAL_DIR / "refrescar_hoja_prueba.py"
     if not script_refrescar.exists():
-        raise HTTPException(status_code=404, detail=f"No se encontró {script_refrescar}")
+        script_refrescar = Path(r"C:\Hostal_Sistema\scripts\refrescar_hoja_prueba.py")
+    if not script_refrescar.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No se encontró refrescar_hoja_prueba.py en {SCRIPTS_HOSTAL_DIR} ni en C:\\Hostal_Sistema\\scripts",
+        )
 
     t0 = time.time()
     proc = subprocess.run(

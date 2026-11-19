@@ -6735,13 +6735,18 @@ def _inyectar_rutas_en_servidor_activo() -> None:
                     import os as _os, subprocess as _sp, time as _time
                     from pathlib import Path as _Path
                     from fastapi.responses import JSONResponse as _JSONResponse
-                    from config import MODO_PRUEBA as _MODO_PRUEBA
+                    from config import MODO_PRUEBA as _MODO_PRUEBA, SCRIPTS_HOSTAL_DIR as _SCRIPTS_HOSTAL_DIR
                     from sync_engine import pull_from_sheets as _pull_from_sheets
                     if not _MODO_PRUEBA:
                         raise HTTPException(status_code=403, detail="Acción exclusiva del entorno de PRUEBA (:8082).")
-                    _scr = _Path(r"C:\Hostal_Sistema\scripts\refrescar_hoja_prueba.py")
+                    _scr = _SCRIPTS_HOSTAL_DIR / "refrescar_hoja_prueba.py"
                     if not _scr.exists():
-                        raise HTTPException(status_code=404, detail=f"No se encontró {_scr}")
+                        _scr = _Path(r"C:\Hostal_Sistema\scripts\refrescar_hoja_prueba.py")
+                    if not _scr.exists():
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"No se encontró refrescar_hoja_prueba.py en {_SCRIPTS_HOSTAL_DIR} ni en C:\\Hostal_Sistema\\scripts",
+                        )
                     _t0 = _time.time()
                     _proc = _sp.run(
                         [_sys.executable, str(_scr)],

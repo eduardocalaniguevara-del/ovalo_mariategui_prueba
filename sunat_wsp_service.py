@@ -43,7 +43,20 @@ from database import db_transaction, get_connection
 from domain_logic import _registrar_movimiento, actualizar_comprobante_desde_panel_local
 
 FACTOR_IGV_HOTEL = 1.105
-EMITIR_NC_SCRIPT = SCRIPTS_HOSTAL_DIR / "emitir_nota_credito_sunat.py"
+
+
+def _resolver_script_hostal(nombre: str) -> Path:
+    """Resuelve un script del Hostal priorizando SCRIPTS_HOSTAL_DIR (scriptsL1/scriptsL2) con fallback a C:\\Hostal_Sistema\\scripts."""
+    candidato = SCRIPTS_HOSTAL_DIR / nombre
+    if candidato.exists():
+        return candidato
+    fallback = HOSTAL_SISTEMA_DIR / "scripts" / nombre
+    if fallback.exists():
+        return fallback
+    return candidato
+
+
+EMITIR_NC_SCRIPT = _resolver_script_hostal("emitir_nota_credito_sunat.py")
 CAPTURAS_SUNAT_DIR = HOSTAL_SISTEMA_DIR / "capturas"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) if os.name == "nt" else 0
 
@@ -215,36 +228,37 @@ def consultar_dni_local_o_reniec(dni_buscado: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    try:
-        url = f"{APISPERU_DNI_URL}/{dni}?token={APISPERU_TOKEN}"
-        with httpx.Client(timeout=4.5, follow_redirects=True) as client:
-            resp = client.get(url)
-            if resp.status_code == 200:
-                data = resp.json()
-                nombres = str(data.get("nombres") or "").strip()
-                ap_pat = str(data.get("apellidoPaterno") or "").strip()
-                ap_mat = str(data.get("apellidoMaterno") or "").strip()
-                nombre_completo = " ".join(x for x in [nombres, ap_pat, ap_mat] if x).strip().upper()
-                if nombre_completo:
-                    with db_transaction() as c_save:
-                        c_save.execute(
-                            """
-                            INSERT INTO huespedes_padron (dni, nombre, visitas, updated_at)
-                            VALUES (?, ?, 0, ?)
-                            ON CONFLICT(dni) DO UPDATE SET nombre = excluded.nombre, updated_at = excluded.updated_at
-                            """,
-                            (dni, nombre_completo, datetime.now().isoformat()),
-                        )
-                    return {
-                        "ok": True,
-                        "dni": dni,
-                        "nombre": nombre_completo,
-                        "nombreCompleto": nombre_completo,
-                        "visitas": 0,
-                        "fuente": "RENIEC",
-                    }
-    except Exception:
-        pass
+    if APISPERU_TOKEN:
+        try:
+            url = f"{APISPERU_DNI_URL}/{dni}?token={APISPERU_TOKEN}"
+            with httpx.Client(timeout=4.5, follow_redirects=True) as client:
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    nombres = str(data.get("nombres") or "").strip()
+                    ap_pat = str(data.get("apellidoPaterno") or "").strip()
+                    ap_mat = str(data.get("apellidoMaterno") or "").strip()
+                    nombre_completo = " ".join(x for x in [nombres, ap_pat, ap_mat] if x).strip().upper()
+                    if nombre_completo:
+                        with db_transaction() as c_save:
+                            c_save.execute(
+                                """
+                                INSERT INTO huespedes_padron (dni, nombre, visitas, updated_at)
+                                VALUES (?, ?, 0, ?)
+                                ON CONFLICT(dni) DO UPDATE SET nombre = excluded.nombre, updated_at = excluded.updated_at
+                                """,
+                                (dni, nombre_completo, datetime.now().isoformat()),
+                            )
+                        return {
+                            "ok": True,
+                            "dni": dni,
+                            "nombre": nombre_completo,
+                            "nombreCompleto": nombre_completo,
+                            "visitas": 0,
+                            "fuente": "RENIEC",
+                        }
+        except Exception:
+            pass
 
     return {"ok": False, "dni": dni, "error": "Sin conexión o DNI no encontrado (ingrese nombre manualmente)."}
 
@@ -299,11 +313,11 @@ def consultar_ruc_local_o_sunat(ruc_buscado: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    # 2. Consulta en línea SUNAT (APIsPERU principal + apis.net.pe respaldo)
-    urls_consulta = [
-        ("APISPERU", f"{APISPERU_RUC_URL}/{ruc}?token={APISPERU_TOKEN}"),
-        ("APIS_NET_PE", f"https://api.apis.net.pe/v1/ruc?numero={ruc}"),
-    ]
+    # 2. Consulta en línea SUNAT (APIsPERU principal si hay token + apis.net.pe respaldo)
+    urls_consulta = []
+    if APISPERU_TOKEN:
+        urls_consulta.append(("APISPERU", f"{APISPERU_RUC_URL}/{ruc}?token={APISPERU_TOKEN}"))
+    urls_consulta.append(("APIS_NET_PE", f"https://api.apis.net.pe/v1/ruc?numero={ruc}"))
     for fuente_api, url in urls_consulta:
         try:
             with httpx.Client(timeout=6.0, follow_redirects=True) as client:
@@ -515,8 +529,9 @@ def _despachar_wsp_pdf(
     en_recepcion = es_laptop_recepcion_directa()
     pista_archivo = os.path.basename(pdf_path) if pdf_path else (nro_cp or "")
 
-    if en_recepcion and BRAZO_WSP_SCRIPT.exists():
-        cmd = [py_bin, str(BRAZO_WSP_SCRIPT), "--telefono", telefono, "--mensaje", mensaje]
+    brazo_script = _resolver_script_hostal("brazo_wsp.py")
+    if en_recepcion and brazo_script.exists():
+        cmd = [py_bin, str(brazo_script), "--telefono", telefono, "--mensaje", mensaje]
         if pdf_path:
             cmd.extend(["--archivo", pdf_path])
         elif nro_cp:
@@ -533,7 +548,7 @@ def _despachar_wsp_pdf(
             cmd.extend(["--archivo", pista_archivo])
         cmd.extend(["--timeout-remoto", "135"])
     else:
-        return False, "", "No se encontró brazo_wsp.py ni ejecutar_remoto.py en C:\\Hostal_Sistema."
+        return False, "", f"No se encontró brazo_wsp.py en {SCRIPTS_HOSTAL_DIR} ni ejecutar_remoto.py en {HOSTAL_SISTEMA_DIR}."
 
     proc = subprocess.run(
         cmd,
@@ -624,9 +639,10 @@ def _ejecutar_trabajo_sunat_wsp(
                 )
 
             if en_recepcion or not EJECUTAR_REMOTO_SCRIPT.exists():
+                nc_script = _resolver_script_hostal("emitir_nota_credito_sunat.py")
                 cmd_nc = [
                     py_bin,
-                    str(EMITIR_NC_SCRIPT),
+                    str(nc_script),
                     "--tipo", tipo,
                     "--numero", nro_origen,
                     "--motivo", motivo,
@@ -906,9 +922,10 @@ def _ejecutar_trabajo_sunat_wsp(
                 "--timeout-remoto", "260",
             ]
         else:
+            emitir_script = _resolver_script_hostal("emitir_comprobante_sunat.py")
             cmd = [
                 py_bin,
-                str(EMITIR_COMPROBANTE_SCRIPT),
+                str(emitir_script),
                 "--payload-json",
                 json.dumps(payload_sunat, ensure_ascii=False),
             ]

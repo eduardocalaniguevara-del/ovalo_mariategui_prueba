@@ -5,6 +5,7 @@ Configuración central de la Aplicación Local Offline-First para Recepción
 Hotel El Óvalo Mariátegui
 """
 
+import importlib.util
 import json
 import os
 import shutil
@@ -155,6 +156,9 @@ SCOPES = [
 
 # Rutas posibles de credenciales de Service Account (solo lectura de ruta, nunca imprimir secreto)
 CREDENTIAL_CANDIDATES = [
+    Path(r"C:\Hostal_SecretosL1\credentials.json"),
+    Path(r"C:\Hostal_SecretosL2\credentials.json"),
+    Path(r"C:\Hostal_Secretos\credentials.json"),
     DATA_DIR / "credentials.json",
     BASE_APP_DIR / "credentials.json",
     Path(r"c:\Users\josec\Downloads\trabajo\Sistema de agentes IA\HostalAI\config\credentials.json"),
@@ -162,29 +166,74 @@ CREDENTIAL_CANDIDATES = [
     BASE_APP_DIR.parent / "HostalAI" / "config" / "credentials.json",
 ]
 
+# Rutas del motor SUNAT / WhatsApp (auto-selección scriptsL2 en Laptop 2, scriptsL1 en Laptop 1, fallback C:\Hostal_Sistema\scripts)
+HOSTAL_SISTEMA_DIR = Path(r"C:\Hostal_Sistema")
+
+
+def _resolver_scripts_hostal_dir() -> Path:
+    es_l2 = Path(r"C:\Users\ovalo mariategui").exists()
+    dir_l2 = BASE_APP_DIR / "scriptsL2"
+    dir_l1 = BASE_APP_DIR / "scriptsL1"
+    if es_l2 and dir_l2.exists():
+        return dir_l2
+    if dir_l1.exists():
+        return dir_l1
+    if dir_l2.exists():
+        return dir_l2
+    return HOSTAL_SISTEMA_DIR / "scripts"
+
+
+SCRIPTS_HOSTAL_DIR = _resolver_scripts_hostal_dir()
+
+
+def _cargar_modulo_secretos():
+    """Carga secretos_hostal.py desde SCRIPTS_HOSTAL_DIR (o scriptsL1/scriptsL2) sin exponer claves en el código."""
+    for carpeta in (SCRIPTS_HOSTAL_DIR, BASE_APP_DIR / "scriptsL1", BASE_APP_DIR / "scriptsL2"):
+        ruta_mod = carpeta / "secretos_hostal.py"
+        if ruta_mod.exists():
+            try:
+                spec = importlib.util.spec_from_file_location("secretos_hostal_runtime", str(ruta_mod))
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    return mod
+            except Exception:
+                continue
+    return None
+
+
+_SECRETOS_MOD = _cargar_modulo_secretos()
+
 
 def obtener_ruta_credenciales() -> str:
+    if _SECRETOS_MOD is not None:
+        try:
+            ruta_boveda = _SECRETOS_MOD.obtener_ruta_credentials_google()
+            if ruta_boveda and Path(ruta_boveda).exists():
+                return str(ruta_boveda)
+        except Exception:
+            pass
     for p in CREDENTIAL_CANDIDATES:
         if p.exists():
             return str(p)
-    return str(CREDENTIAL_CANDIDATES[2])
+    return str(CREDENTIAL_CANDIDATES[0])
 
 
-# Rutas del motor SUNAT / WhatsApp en C:\Hostal_Sistema
-HOSTAL_SISTEMA_DIR = Path(r"C:\Hostal_Sistema")
-SCRIPTS_HOSTAL_DIR = HOSTAL_SISTEMA_DIR / "scripts"
 EJECUTAR_REMOTO_SCRIPT = HOSTAL_SISTEMA_DIR / "ejecutar_remoto.py"
 EMITIR_COMPROBANTE_SCRIPT = SCRIPTS_HOSTAL_DIR / "emitir_comprobante_sunat.py"
 BRAZO_WSP_SCRIPT = SCRIPTS_HOSTAL_DIR / "brazo_wsp.py"
 REGLAS_AUDITORIA_JSON = HOSTAL_SISTEMA_DIR / "reglas_auditoria.json"
 DESCARGAS_RECEPCION_DIR = HOSTAL_SISTEMA_DIR / "descargas_recepcion"
 
-# APIsPERU (Consulta DNI RENIEC / RUC SUNAT cuando hay internet; fallback a padrón SQLite offline)
-APISPERU_TOKEN = (
-    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9."
-    "eyJlbWFpbCI6ImVkdWFyZG9jYWxhbmlndWV2YXJhQGdtYWlsLmNvbSIsImp0aSI6ImIxMDM1MmRkY2VmZDU4MDkifQ."
-    "0sX69ADETj8CXcs_HLn9_n9ioe6KW2IwLKo_ot5XtiA"
-)
+# APIsPERU (Consulta DNI RENIEC / RUC SUNAT desde bóveda local; 0 tokens literales en código fuente)
+try:
+    APISPERU_TOKEN = (
+        str(_SECRETOS_MOD.obtener_apisperu_token() or "").strip()
+        if _SECRETOS_MOD is not None
+        else ""
+    )
+except Exception:
+    APISPERU_TOKEN = ""
 APISPERU_DNI_URL = "https://dniruc.apisperu.com/api/v1/dni"
 APISPERU_RUC_URL = "https://dniruc.apisperu.com/api/v1/ruc"
 
@@ -213,17 +262,21 @@ COL_TIPO_ADICIONAL_IDX = _col_letra_a_indice(COL_TIPO_ADICIONAL)
 # --- Sincronización en Vivo con Supabase (Grupo 2 Compartido: ovalo_sistema.db <-> hostal-ovalo <-> Laptop 2) ---
 # Decisión D3 (18/11/2026): En MODO_PRUEBA Supabase está 100% apagado siempre.
 SUPABASE_ENABLED = False if MODO_PRUEBA else (not _ES_CARPETA_TERRAZAS)
-SUPABASE_URL = "https://fmlfqupwscymosvwnnzx.supabase.co"
+try:
+    _SUPABASE_BOVEDA = (
+        _SECRETOS_MOD.obtener_supabase_hostal(requerido=False)
+        if _SECRETOS_MOD is not None
+        else {}
+    )
+except Exception:
+    _SUPABASE_BOVEDA = {}
+SUPABASE_URL = str(_SUPABASE_BOVEDA.get("url") or "https://fmlfqupwscymosvwnnzx.supabase.co").strip()
 # Puente de pruebas: 100% apagado siempre (Decisión D3: cero tráfico hacia Supabase desde prueba).
 SUPABASE_SANDBOX_CONNECTED = False
 # SHA-256 del codigo de autorizacion para promover a operativa / tocar Arnes2 (codigo: ver al titular).
 ARNES_AUTH_SHA256 = "c2f593c98b648395cc08947d97a7d4829db29ffa5c924c44ae1bc2eeac30b05c"
-SUPABASE_ANON_KEY = (
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZtbGZxdXB3c2N5bW9zdndubnp4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0MjYzNzUsImV4cCI6MjExMDAwMjM3NX0."
-    "pi3f4dEklYT28oBxYhktYlWwGiLkFdMqhqSq6-gfZ2g"
-)
-SUPABASE_SYNC_TOKEN = "ovalo_master_sync_2026_k9x"
+SUPABASE_ANON_KEY = str(_SUPABASE_BOVEDA.get("anon_key") or "").strip()
+SUPABASE_SYNC_TOKEN = str(_SUPABASE_BOVEDA.get("sync_token") or "").strip()
 EQUIPO_ID = (
     "LAPTOP_1_ADMIN"
     if (BASE_APP_DIR.parent / "wsp_wspdocs_russ.db").exists()
