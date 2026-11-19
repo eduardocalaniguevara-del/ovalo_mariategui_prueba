@@ -672,7 +672,7 @@ def _estado_sunat_texto(conn: sqlite3.Connection, est: Dict[str, Any], cpe_texto
     try:
         if nro:
             r = conn.execute(
-                "SELECT nro_cp, estado, total FROM sunat_ventas WHERE UPPER(nro_cp)=UPPER(?) LIMIT 1",
+                "SELECT nro_cp, estado FROM sunat_ventas WHERE UPPER(nro_cp)=UPPER(?) LIMIT 1",
                 (nro,),
             ).fetchone()
             if r:
@@ -797,7 +797,7 @@ def _generar_sugerencia_perfil_wsp(nombre_wsp: str, conn_local: Optional[sqlite3
                     WHERE LENGTH(TRIM(COALESCE(receptor_doc,''))) = 11
                       AND (receptor_doc LIKE '20%' OR receptor_doc LIKE '10%')
                       AND UPPER(COALESCE(receptor_nombre,'')) LIKE ?
-                    ORDER BY id DESC LIMIT 5""",
+                    ORDER BY rowid DESC LIMIT 5""",
                 (f"%{tk}%",),
             ).fetchall()
             rucs_distintos = {str(x["receptor_doc"]).strip(): str(x["receptor_nombre"]).strip() for x in r_sv if x["receptor_doc"]}
@@ -813,7 +813,7 @@ def _generar_sugerencia_perfil_wsp(nombre_wsp: str, conn_local: Optional[sqlite3
                     WHERE LENGTH(TRIM(COALESCE(receptor_doc,''))) = 11
                       AND UPPER(COALESCE(receptor_nombre,'')) LIKE ?
                       AND UPPER(COALESCE(receptor_nombre,'')) LIKE ?
-                    ORDER BY id DESC LIMIT 3""",
+                    ORDER BY rowid DESC LIMIT 3""",
                 (f"%{t1}%", f"%{t2}%"),
             ).fetchall()
             if r_sv2:
@@ -1748,8 +1748,14 @@ def ejecutar_analisis_agente_wsp(forzar: bool = False, slot_horario: str = "") -
                 return _construir_respuesta_bandeja(existente)
 
         if forzar:
-            # Decisión D3 (18/11/2026): En modo prueba Supabase está 100% apagado; no envía chats WSP a Supabase real
-            if not MODO_PRUEBA:
+            # Decisión D3 (18/11/2026): En modo prueba Supabase está 100% apagado; se sincroniza WSP vía Google Sheets (`2026_Prueba_Ovalo`).
+            if MODO_PRUEBA:
+                try:
+                    import wsp_sheets_bridge as _wsb
+                    _wsb.sincronizar_wsp_prueba_sheets(forzar=True)
+                except Exception as _exc_wsb:
+                    print(f"[WSP Sheets Bridge] aviso en análisis forzado: {_exc_wsb}")
+            else:
                 try:
                     import supabase_sync as _ss
                     if hasattr(_ss, "_sincronizar_espejo_wsp_modo_prueba"):
@@ -1903,6 +1909,7 @@ def obtener_alertas_wsp() -> Dict[str, Any]:
 
 def tick_resumen_programado() -> Optional[Dict[str, Any]]:
     """Llamado por OvaloWspWorker cada 30 s:
+    0) En MODO_PRUEBA sincroniza WSP vía Google Sheets (`2026_Prueba_Ovalo`) cada ~60 s (0% Supabase).
     1) Si `wsp_resumen_ejecutivo` está vacía, genera el primer corte inicial.
     2) Cuando el reloj alcanza cualquiera de los 4 horarios fijos (`08:00`, `13:00`, `19:00`, `23:00`),
        ejecuta el análisis exactamente una vez para ese slot."""
@@ -1910,6 +1917,15 @@ def tick_resumen_programado() -> Optional[Dict[str, Any]]:
     ahora_dt = datetime.now()
     hoy_iso = ahora_dt.strftime("%Y-%m-%d")
     hhmm_actual = ahora_dt.strftime("%H:%M")
+
+    if MODO_PRUEBA:
+        try:
+            import wsp_sheets_bridge as _wsb
+            res_bridge = _wsb.sincronizar_wsp_prueba_sheets(forzar=False)
+            if res_bridge.get("ok") and int(res_bridge.get("nuevos_mensajes") or 0) > 0:
+                return ejecutar_analisis_agente_wsp(forzar=False, slot_horario=f"{hoy_iso} SYNC {hhmm_actual}")
+        except Exception as _exc_wsb:
+            print(f"[WSP Sheets Bridge] aviso en worker: {_exc_wsb}")
 
     ultimo = _leer_ultimo_corte_db()
     if ultimo is None:
