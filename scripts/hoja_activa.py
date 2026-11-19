@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 SELECTOR CENTRAL DE HOJA DE GOOGLE SHEETS Y ENTORNO CLI (OPERATIVA vs PRUEBA)
-Hotel El Óvalo Mariátegui — 100% Auto-Relativo (scriptsL1 / scriptsL2)
+Hotel El Óvalo Mariátegui — 100% Auto-Relativo (scripts/)
 
 Detecta automáticamente BASE_APP_DIR = Path(__file__).resolve().parent.parent:
   - Lee BASE_APP_DIR / "data" / "hotel_perfil.json" (respetando OVALO_ENTORNO si está definido).

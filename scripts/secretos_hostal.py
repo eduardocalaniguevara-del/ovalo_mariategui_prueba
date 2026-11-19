@@ -2,15 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 GESTOR CENTRAL DE BÓVEDA LOCAL DE SECRETOS (GRUPO 2 - HOTEL EL ÓVALO MARIÁTEGUI)
-Ubicación en repositorio: scriptsL1/secretos_hostal.py (y espejo scriptsL2/secretos_hostal.py)
+Ubicación en repositorio: scripts/secretos_hostal.py
 
 Reglas de seguridad:
 - 0 contraseñas, 0 tokens, 0 llaves Fernet y 0 credenciales dentro del código fuente.
-- Lee exclusivamente desde la bóveda local fuera de Git y fuera de Syncthing:
-  * Laptop 2 (existe C:\\Users\\ovalo mariategui):
-      C:\\Hostal_SecretosL2 -> C:\\Hostal_Secretos -> C:\\Hostal_SecretosL1 -> C:\\Hostal_Sistema\\config
-  * Laptop 1 (no existe C:\\Users\\ovalo mariategui):
-      C:\\Hostal_SecretosL1 -> C:\\Hostal_Secretos -> C:\\Hostal_Sistema\\config
+- Estándar universal para todas las laptops (Laptop 1, Laptop 2, Laptop 3...):
+  Lee prioritariamente desde la bóveda local única C:\\Hostal_Secretos\\ (fuera de Git y fuera de Syncthing),
+  con respaldo de compatibilidad hacia nombres heredados (C:\\Hostal_SecretosL2, C:\\Hostal_SecretosL1, C:\\Hostal_Sistema\\config).
 """
 
 from __future__ import annotations
@@ -21,9 +19,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 _PERFIL_LAPTOP2 = Path(r"C:\Users\ovalo mariategui")
+_BOVEDA_COMUN = Path(r"C:\Hostal_Secretos")
 _BOVEDA_L1 = Path(r"C:\Hostal_SecretosL1")
 _BOVEDA_L2 = Path(r"C:\Hostal_SecretosL2")
-_BOVEDA_COMUN = Path(r"C:\Hostal_Secretos")
 _FALLBACK_CONFIG = Path(r"C:\Hostal_Sistema\config")
 
 
@@ -33,16 +31,16 @@ def es_laptop_2() -> bool:
 
 
 def _candidatos_boveda() -> List[Path]:
-    """Retorna la lista ordenada de carpetas candidatas de bóveda según la laptop."""
+    """Retorna la lista ordenada de carpetas candidatas de bóveda (estándar universal C:\\Hostal_Secretos primero)."""
     candidatos: List[Path] = []
     env_dir = os.environ.get("HOSTAL_BOVEDA_DIR", "").strip()
     if env_dir:
         candidatos.append(Path(env_dir))
 
     if es_laptop_2():
-        orden = [_BOVEDA_L2, _BOVEDA_COMUN, _BOVEDA_L1, _FALLBACK_CONFIG]
+        orden = [_BOVEDA_COMUN, _BOVEDA_L2, _BOVEDA_L1, _FALLBACK_CONFIG]
     else:
-        orden = [_BOVEDA_L1, _BOVEDA_COMUN, _FALLBACK_CONFIG]
+        orden = [_BOVEDA_COMUN, _BOVEDA_L1, _BOVEDA_L2, _FALLBACK_CONFIG]
 
     for ruta in orden:
         if ruta not in candidatos:
@@ -98,9 +96,8 @@ def obtener_sunat_hostal(requerido: bool = True) -> Dict[str, str]:
     ruta = _buscar_archivo_boveda("sunat_hostal.json")
     if ruta is None:
         if requerido:
-            esperado = _BOVEDA_L2 if es_laptop_2() else _BOVEDA_L1
             raise FileNotFoundError(
-                f"No se encontró sunat_hostal.json en la bóveda local ({esperado}). "
+                f"No se encontró sunat_hostal.json en la bóveda local ({_BOVEDA_COMUN}). "
                 f"Cree el archivo usando secretos_ejemplo.json como plantilla."
             )
         return {
@@ -155,9 +152,8 @@ def obtener_supabase_hostal(requerido: bool = False) -> Dict[str, str]:
     ruta = _buscar_archivo_boveda("supabase_hostal.json")
     if ruta is None:
         if requerido:
-            esperado = _BOVEDA_L2 if es_laptop_2() else _BOVEDA_L1
             raise FileNotFoundError(
-                f"No se encontró supabase_hostal.json en la bóveda local ({esperado})."
+                f"No se encontró supabase_hostal.json en la bóveda local ({_BOVEDA_COMUN})."
             )
         return {
             "url": "",

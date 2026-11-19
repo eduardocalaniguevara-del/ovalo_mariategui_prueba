@@ -46,7 +46,7 @@ FACTOR_IGV_HOTEL = 1.105
 
 
 def _resolver_script_hostal(nombre: str) -> Path:
-    """Resuelve un script del Hostal priorizando SCRIPTS_HOSTAL_DIR (scriptsL1/scriptsL2) con fallback a C:\\Hostal_Sistema\\scripts."""
+    """Resuelve un script del Hostal priorizando SCRIPTS_HOSTAL_DIR (scripts/) con fallback a C:\\Hostal_Sistema\\scripts."""
     candidato = SCRIPTS_HOSTAL_DIR / nombre
     if candidato.exists():
         return candidato

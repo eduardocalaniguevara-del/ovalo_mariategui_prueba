@@ -53,9 +53,9 @@ IDS_OPERATIVOS_PROHIBIDOS = {
 }
 
 CRED_CANDIDATES = [
+    Path(r"C:\Hostal_Secretos\credentials.json"),
     Path(r"C:\Hostal_SecretosL1\credentials.json"),
     Path(r"C:\Hostal_SecretosL2\credentials.json"),
-    Path(r"C:\Hostal_Secretos\credentials.json"),
     Path(r"C:\Hostal_Sistema\config\credentials.json"),
     BASE_APP_DIR / "data" / "credentials.json",
     Path(r"C:\Recepcion_Ovalo_Local\data\credentials.json"),

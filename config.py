@@ -156,9 +156,9 @@ SCOPES = [
 
 # Rutas posibles de credenciales de Service Account (solo lectura de ruta, nunca imprimir secreto)
 CREDENTIAL_CANDIDATES = [
+    Path(r"C:\Hostal_Secretos\credentials.json"),
     Path(r"C:\Hostal_SecretosL1\credentials.json"),
     Path(r"C:\Hostal_SecretosL2\credentials.json"),
-    Path(r"C:\Hostal_Secretos\credentials.json"),
     DATA_DIR / "credentials.json",
     BASE_APP_DIR / "credentials.json",
     Path(r"c:\Users\josec\Downloads\trabajo\Sistema de agentes IA\HostalAI\config\credentials.json"),
@@ -166,20 +166,14 @@ CREDENTIAL_CANDIDATES = [
     BASE_APP_DIR.parent / "HostalAI" / "config" / "credentials.json",
 ]
 
-# Rutas del motor SUNAT / WhatsApp (auto-selección scriptsL2 en Laptop 2, scriptsL1 en Laptop 1, fallback C:\Hostal_Sistema\scripts)
+# Rutas del motor SUNAT / WhatsApp (estándar único scripts/ en Git, con fallback a C:\Hostal_Sistema\scripts)
 HOSTAL_SISTEMA_DIR = Path(r"C:\Hostal_Sistema")
 
 
 def _resolver_scripts_hostal_dir() -> Path:
-    es_l2 = Path(r"C:\Users\ovalo mariategui").exists()
-    dir_l2 = BASE_APP_DIR / "scriptsL2"
-    dir_l1 = BASE_APP_DIR / "scriptsL1"
-    if es_l2 and dir_l2.exists():
-        return dir_l2
-    if dir_l1.exists():
-        return dir_l1
-    if dir_l2.exists():
-        return dir_l2
+    dir_unico = BASE_APP_DIR / "scripts"
+    if dir_unico.exists():
+        return dir_unico
     return HOSTAL_SISTEMA_DIR / "scripts"
 
 
@@ -187,8 +181,8 @@ SCRIPTS_HOSTAL_DIR = _resolver_scripts_hostal_dir()
 
 
 def _cargar_modulo_secretos():
-    """Carga secretos_hostal.py desde SCRIPTS_HOSTAL_DIR (o scriptsL1/scriptsL2) sin exponer claves en el código."""
-    for carpeta in (SCRIPTS_HOSTAL_DIR, BASE_APP_DIR / "scriptsL1", BASE_APP_DIR / "scriptsL2"):
+    """Carga secretos_hostal.py desde SCRIPTS_HOSTAL_DIR (scripts/) sin exponer claves en el código."""
+    for carpeta in (SCRIPTS_HOSTAL_DIR, BASE_APP_DIR / "scripts"):
         ruta_mod = carpeta / "secretos_hostal.py"
         if ruta_mod.exists():
             try:
