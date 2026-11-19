@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import APP_HOST, APP_PORT, MODO_PRUEBA, STATIC_DIR, SYNC_INTERVAL_SECONDS, NOMBRE_HOTEL
+from config import APP_HOST, APP_PORT, HOJA_PRUEBA_HABILITADA, MODO_PRUEBA, STATIC_DIR, SYNC_INTERVAL_SECONDS, NOMBRE_HOTEL
 from database import get_connection, init_db
 import tablet_manager as tm
 import yape_manager as ym
@@ -98,11 +98,20 @@ def _is_bootstrap_completed() -> bool:
 
 def _run_sync_cycle(force_full: bool = False) -> None:
     if MODO_PRUEBA:
-        # Sistema de PRUEBA: nunca toca Google Sheets ni las tablas reales; solo puente sandbox_change_log
+        # Decisión D3 (18/11/2026): En modo prueba NUNCA llamar a sync_with_supabase().
+        # Con HOJA_PRUEBA_HABILITADA sincroniza bidireccionalmente contra 2026_Prueba_Ovalo (1VXg1d8Q...).
+        if not HOJA_PRUEBA_HABILITADA:
+            return
+        if not _sync_lock.acquire(blocking=False):
+            return
         try:
-            sync_with_supabase()
+            process_sync_queue()
+            boot_done = _is_bootstrap_completed()
+            pull_from_sheets(full_bootstrap=(force_full or not boot_done))
         except Exception as exc:
-            print(f"[SyncWorker][PRUEBA] puente sandbox: {exc}")
+            print(f"[SyncWorker][PRUEBA] Advertencia en ciclo con Hoja de Prueba: {exc}")
+        finally:
+            _sync_lock.release()
         return
     if not _sync_lock.acquire(blocking=False):
         return
@@ -441,7 +450,7 @@ def index():
             '<div style="position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#c2410c;color:#fff;'
             'font:700 12px/1 system-ui,sans-serif;text-align:center;padding:4px 8px;letter-spacing:.5px;'
             'pointer-events:none;box-shadow:0 1px 4px rgba(0,0,0,.4)">'
-            '🧪 SISTEMA DE PRUEBA — OVALO MARIATEGUI PRUEBA · Los datos NO son reales y NO llegan a la hoja, Supabase, SUNAT ni WhatsApp'
+            '🧪 SISTEMA DE PRUEBA — OVALO MARIATEGUI PRUEBA · Vinculado a hoja 2026_Prueba_Ovalo · NO toca Hoja Operativa, Supabase, SUNAT ni WhatsApp'
             '</div><div style="height:22px"></div>'
         )
         html = re.sub(r"(<body[^>]*>)", lambda _m: _m.group(1) + banner, html, count=1, flags=re.IGNORECASE)

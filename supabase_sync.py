@@ -114,6 +114,21 @@ def init_supabase_local_triggers() -> None:
     Asegura que todas las tablas del Grupo 2 y los triggers de captura Delta (_supabase_outbox)
     existan en ovalo_sistema.db.
     """
+    if MODO_PRUEBA:
+        # Decisión D3 (18/11/2026): En modo prueba Supabase está 100% apagado; eliminar triggers heredados y vaciar outbox.
+        conn_p = get_connection()
+        try:
+            trgs = [r[0] for r in conn_p.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_sb_%'").fetchall()]
+            for t_name in trgs:
+                conn_p.execute(f"DROP TRIGGER IF EXISTS {t_name}")
+            if conn_p.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='_supabase_outbox'").fetchone():
+                conn_p.execute("DELETE FROM _supabase_outbox")
+            conn_p.commit()
+        except Exception:
+            pass
+        finally:
+            conn_p.close()
+        return
     if not (SUPABASE_ENABLED or _SANDBOX):
         return
 
@@ -1020,13 +1035,12 @@ def _reconciliar_ultimos_dias_una_vez() -> None:
 
 def _sincronizar_espejo_wsp_modo_prueba() -> int:
     """
-    Puente de WhatsApp para el entorno de PRUEBA (8082) entre Laptop 2 y Laptop 1:
-    - Si este equipo tiene mensajes locales de WhatsApp (Laptop 2 leyendo de su operativa local),
-      asegura que estén publicados en las tablas wsp_recepcion_* de Supabase.
-    - Si este equipo no tiene los mensajes locales al día (Laptop 1), los descarga en solo lectura
-      desde Supabase hacia la SQLite de prueba (8082).
-    Jamás modifica estancias, pagos, tienda ni Google Sheets.
+    Decisión D3 (18/11/2026): En modo prueba Supabase está 100% apagado; no envía chats WSP a Supabase real
+    ni descarga desde Supabase.
     """
+    if MODO_PRUEBA:
+        # Decisión D3 (18/11/2026): En modo prueba Supabase está 100% apagado; no envía chats WSP a Supabase real
+        return 0
     if not MODO_PRUEBA:
         return 0
     total_movs = 0
@@ -1119,19 +1133,14 @@ def sync_with_supabase() -> Dict[str, Any]:
     Ejecuta un ciclo completo Bidireccional (Push local -> Supabase + Pull Supabase -> local).
     """
     if MODO_PRUEBA:
-        if not _sb_lock.acquire(blocking=False):
-            return {"status": "BUSY", "pushed": 0, "pulled": 0}
-        try:
-            wsp_movs = _sincronizar_espejo_wsp_modo_prueba()
-            pushed = push_to_supabase() if _SANDBOX else 0
-            pulled = (pull_from_supabase() if _SANDBOX else 0) + wsp_movs
-            return {"status": "OK_SANDBOX", "equipo": EQUIPO_ID, "pushed": pushed, "pulled": pulled,
-                    "ts": datetime.now().isoformat()}
-        except Exception as exc:
-            print(f"[SupabaseSync][SANDBOX] Error ({EQUIPO_ID}): {exc}")
-            return {"status": "ERROR", "equipo": EQUIPO_ID, "error": str(exc), "ts": datetime.now().isoformat()}
-        finally:
-            _sb_lock.release()
+        # Decisión D3 (18/11/2026): En modo prueba Supabase está 100% apagado; cero tráfico de red.
+        return {
+            "status": "DISABLED_MODO_PRUEBA",
+            "equipo": EQUIPO_ID,
+            "pushed": 0,
+            "pulled": 0,
+            "ts": datetime.now().isoformat(),
+        }
     if not SUPABASE_ENABLED:
         return {"status": "DISABLED", "pushed": 0, "pulled": 0}
     lock = _sb_lock
@@ -1189,7 +1198,8 @@ def _sb_guard_sandbox_url(url: str, method: str) -> None:
 
 def _http_json(url: str, method: str = "GET", payload: Any = None, extra: Dict[str, str] | None = None, timeout: int = 20):
     if MODO_PRUEBA:
-        _sb_guard_sandbox_url(url, method)
+        # Decisión D3 (18/11/2026): En modo prueba Supabase está 100% apagado.
+        raise PermissionError(f"MODO_PRUEBA (D3): Supabase 100% apagado; llamada bloqueada hacia {method} {url}")
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, headers=_headers(extra), method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -1316,7 +1326,9 @@ def _pull_sandbox() -> int:
 
 
 def extraer_datos_reales_supabase_readonly(tablas: List[str] | None = None) -> Dict[str, Any]:
-    """SOLO LECTURA (GET) de las tablas reales de Supabase hacia la SQLite de prueba. Nunca escribe en la real."""
+    """Decisión D3 (18/11/2026): En modo prueba Supabase está 100% apagado (los datos se refrescan desde 2026_Prueba_Ovalo)."""
+    if MODO_PRUEBA:
+        return {"status": "DISABLED_MODO_PRUEBA", "solo_lectura": True, "total_filas": 0, "tablas": {}}
     if not MODO_PRUEBA:
         return {"status": "ERROR", "error": "Solo disponible en MODO_PRUEBA"}
     elegidas = [t for t in (tablas or list(TABLAS_GRUPO2_PK.keys())) if t in TABLAS_GRUPO2_PK]
@@ -1381,11 +1393,12 @@ def registrar_aprendizaje_compartido(actor: str, categoria: str, pregunta_o_even
         conn.commit()
     finally:
         conn.close()
-    remoto = "no_enviado"
-    try:
-        _http_json(f"{SUPABASE_URL}/rest/v1/aprendizaje_compartido_hostal?on_conflict=id", "POST", [fila],
-                   {"Prefer": "resolution=merge-duplicates,return=minimal"})
-        remoto = "enviado"
-    except Exception as exc:
-        remoto = f"pendiente: {exc}"
+    remoto = "deshabilitado_modo_prueba" if MODO_PRUEBA else "no_enviado"
+    if not MODO_PRUEBA and SUPABASE_ENABLED:
+        try:
+            _http_json(f"{SUPABASE_URL}/rest/v1/aprendizaje_compartido_hostal?on_conflict=id", "POST", [fila],
+                       {"Prefer": "resolution=merge-duplicates,return=minimal"})
+            remoto = "enviado"
+        except Exception as exc:
+            remoto = f"pendiente: {exc}"
     return {"status": "OK", "id": fila["id"], "remoto": remoto}

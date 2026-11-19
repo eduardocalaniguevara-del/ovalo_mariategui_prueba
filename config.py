@@ -20,6 +20,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 _ES_CARPETA_TERRAZAS = "terrazas" in str(BASE_APP_DIR).lower()
+_ES_CARPETA_PRUEBA = ("prueba" in str(BASE_APP_DIR).lower()) and not _ES_CARPETA_TERRAZAS
 
 # Unificación de Base Compartida Grupo 2 (ovalo_sistema.db) para Hotel El Óvalo Mariátegui
 if _ES_CARPETA_TERRAZAS:
@@ -28,7 +29,7 @@ else:
     _ROOT_OVALO_DB = BASE_APP_DIR.parent / "ovalo_sistema.db"
     _DATA_OVALO_DB = DATA_DIR / "ovalo_sistema.db"
     _LEGACY_LOCAL_DB = DATA_DIR / "ovalo_local.db"
-    if _ROOT_OVALO_DB.exists():
+    if _ROOT_OVALO_DB.exists() and _ROOT_OVALO_DB.stat().st_size > 0:
         DB_PATH = _ROOT_OVALO_DB
     else:
         if not _DATA_OVALO_DB.exists() and _LEGACY_LOCAL_DB.exists():
@@ -54,8 +55,19 @@ _PERFIL_TERRAZAS = {
     "app_port": 8081,
 }
 
-_ES_CARPETA_TERRAZAS = "terrazas" in str(BASE_APP_DIR).lower()
-_DEFAULT_PERFIL = dict(_PERFIL_TERRAZAS if _ES_CARPETA_TERRAZAS else _PERFIL_OVALO)
+_PERFIL_PRUEBA_DEFAULT = {
+    "nombre_hotel": "Ovalo Mariategui PRUEBA",
+    "spreadsheet_id": "SIN_HOJA_MODO_PRUEBA",
+    "col_tipo_adicional": "BA",
+    "formula_snacks_en_s2": False,
+    "app_port": 8082,
+    "modo_prueba": False,
+    "conectar_pruebas_supabase": False,
+}
+
+_DEFAULT_PERFIL = dict(
+    _PERFIL_TERRAZAS if _ES_CARPETA_TERRAZAS else (_PERFIL_PRUEBA_DEFAULT if _ES_CARPETA_PRUEBA else _PERFIL_OVALO)
+)
 
 
 def cargar_perfil_hotel() -> dict:
@@ -100,12 +112,30 @@ PERFIL_HOTEL = cargar_perfil_hotel()
 NOMBRE_HOTEL = str(PERFIL_HOTEL.get("nombre_hotel") or _DEFAULT_PERFIL["nombre_hotel"]).strip()
 
 # --- MODO PRUEBA (Sistema "ovalo_mariategui_prueba") ---
-# Se activa SOLO con "modo_prueba": true en data/hotel_perfil.json (carpeta data/ nunca la pisa el actualizador).
-# En modo prueba: sin Supabase, sin Google Sheets, sin auto-actualización desde GitHub, sin SUNAT, sin WhatsApp.
+# Se activa con "modo_prueba": true en data/hotel_perfil.json (o por estar en carpeta de prueba).
+# En modo prueba: conectado SOLO a 2026_Prueba_Ovalo; 0% Supabase (D3), sin SUNAT real, sin WhatsApp real.
 MODO_PRUEBA = bool(PERFIL_HOTEL.get("modo_prueba", False)) and not _ES_CARPETA_TERRAZAS
 
 # Google Sheets Maestro (leído dinámicamente de data/hotel_perfil.json en cada hotel)
 SPREADSHEET_ID = str(PERFIL_HOTEL.get("spreadsheet_id") or _DEFAULT_PERFIL["spreadsheet_id"]).strip()
+
+_IDS_OPERATIVOS_PROHIBIDOS_EN_PRUEBA = {
+    "1KudqxM1D6MSCxT5Zb2_vAOTGxnw9Ja92JuFjFpDuxZ8",
+    "1vgjOLxc-eh1zw42uC3pxnM86Lo2jZkz8_uwrEFhw8ss",
+}
+if _ES_CARPETA_PRUEBA and (not MODO_PRUEBA or SPREADSHEET_ID in _IDS_OPERATIVOS_PROHIBIDOS_EN_PRUEBA):
+    raise SystemExit("⛔ ERROR CRÍTICO DE SEGURIDAD: Carpeta de PRUEBA sin modo_prueba=True o apuntando a una Hoja OPERATIVA. Arranque abortado.")
+if MODO_PRUEBA and SPREADSHEET_ID in _IDS_OPERATIVOS_PROHIBIDOS_EN_PRUEBA:
+    raise SystemExit("⛔ ERROR CRÍTICO DE SEGURIDAD: El entorno de PRUEBA apunta a una Hoja OPERATIVA. Arranque abortado.")
+
+HOJA_PRUEBA_HABILITADA = bool(
+    MODO_PRUEBA
+    and SPREADSHEET_ID
+    and SPREADSHEET_ID not in ("SIN_HOJA_MODO_PRUEBA", "")
+    and SPREADSHEET_ID not in _IDS_OPERATIVOS_PROHIBIDOS_EN_PRUEBA
+)
+if MODO_PRUEBA:
+    os.environ["OVALO_ENTORNO"] = "prueba"
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -169,10 +199,11 @@ def _col_letra_a_indice(letras: str) -> int:
 COL_TIPO_ADICIONAL_IDX = _col_letra_a_indice(COL_TIPO_ADICIONAL)
 
 # --- Sincronización en Vivo con Supabase (Grupo 2 Compartido: ovalo_sistema.db <-> hostal-ovalo <-> Laptop 2) ---
-SUPABASE_ENABLED = (not _ES_CARPETA_TERRAZAS) and (not MODO_PRUEBA)
+# Decisión D3 (18/11/2026): En MODO_PRUEBA Supabase está 100% apagado siempre.
+SUPABASE_ENABLED = False if MODO_PRUEBA else (not _ES_CARPETA_TERRAZAS)
 SUPABASE_URL = "https://fmlfqupwscymosvwnnzx.supabase.co"
-# Puente de pruebas: desactivado por defecto (100% local en cada laptop, 0 consumo en Supabase).
-SUPABASE_SANDBOX_CONNECTED = bool(PERFIL_HOTEL.get("conectar_pruebas_supabase", False)) and MODO_PRUEBA
+# Puente de pruebas: 100% apagado siempre (Decisión D3: cero tráfico hacia Supabase desde prueba).
+SUPABASE_SANDBOX_CONNECTED = False
 # SHA-256 del codigo de autorizacion para promover a operativa / tocar Arnes2 (codigo: ver al titular).
 ARNES_AUTH_SHA256 = "c2f593c98b648395cc08947d97a7d4829db29ffa5c924c44ae1bc2eeac30b05c"
 SUPABASE_ANON_KEY = (
