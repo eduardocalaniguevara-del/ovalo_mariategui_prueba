@@ -148,10 +148,11 @@ def actualizar_entorno_prueba():
     if not DEST_PRUEBA.exists():
         return
 
+    # Proteger código Punto 2.C en C:\ovalo_mariategui_prueba (HOJA_PRUEBA_HABILITADA / 2026_Prueba_Ovalo)
+    cfg_prueba = DEST_PRUEBA / "config.py"
+    tiene_punto2c = cfg_prueba.is_file() and "HOJA_PRUEBA_HABILITADA" in cfg_prueba.read_text(encoding="utf-8", errors="ignore")
+
     archivos_prueba = [
-        "config.py",
-        "supabase_sync.py",
-        "main.py",
         "promover_a_operativa.py",
         "crear_entorno_prueba.py",
         "scheduler_recepcion_24x7.py",
@@ -159,6 +160,8 @@ def actualizar_entorno_prueba():
         "Abrir_Visor_SQLite_y_Arnes_L2.bat",
         "leemeantrigravityrecepcion.md",
     ]
+    if not tiene_punto2c:
+        archivos_prueba = ["config.py", "supabase_sync.py", "main.py"] + archivos_prueba
     for nombre in archivos_prueba:
         src_f = HERE / nombre
         if src_f.is_file():
